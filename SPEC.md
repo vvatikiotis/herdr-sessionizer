@@ -14,7 +14,7 @@ Provide a terminal directory picker with open workspaces first and other project
 
 Selecting a directory focuses the workspace with the same directory basename, if one exists. Otherwise, use the sibling shell-pool tool when installed to create a workspace with a warm shell, matching workspace/tab names, and the selected directory. If the tool is absent, create and focus a workspace through Herdr and name its initial tab when Herdr returns a tab identifier.
 
-Maintain persistent, unique workspace visit history through plugin startup and workspace-focus events. A separate jump-back command uses that history to toggle between the two most recently visited workspaces that remain open.
+Maintain persistent, unique workspace visit history through plugin startup, workspace-focus, and pane-exit hooks. Exclude the pool from that history. When shell exit closes a workspace and Herdr falls back to the pool, restore a surviving user workspace. A separate jump-back command toggles between the two most recently visited workspaces that remain open.
 
 The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and server operations; fzf supplies the picker. Host key bindings and popup presentation are caller-owned integrations.
 
@@ -55,13 +55,14 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 33. As a terminal user, I want repeated jump-back invocations to alternate between the latest two available workspaces, so that I can move between tasks without reopening the picker.
 34. As a terminal user, I want jump-back to do nothing when no previous workspace remains, so that zero or one open workspace is handled safely.
 35. As a terminal user, I want a failed jump-back focus operation to leave the previous target available, so that a failed switch does not count as a successful visit.
-36. As a plugin installer, I want declared startup and focus-event hooks and platform/version requirements, so that Herdr can run the history tracker through its plugin lifecycle.
+36. As a plugin installer, I want declared startup, focus, and pane-exit hooks and platform/version requirements, so that Herdr can run history tracking and shell-exit focus recovery through its plugin lifecycle.
+37. As a terminal user, I want Ctrl+d in the final shell of a workspace to return from the pool to a surviving user workspace, so that closing a project does not leave me in internal infrastructure.
 
 ## Implementation Decisions
 
 ### Plugin boundary and runtime
 
-- Keep three command responsibilities: interactive selection, focus-history tracking, and jump-back. The user-facing Rust binary accepts `pick` and `jump-back`; the manifest invokes its `track` mode for lifecycle hooks. The picker and jump-back invoke the same tracker rather than implementing separate history rules.
+- The user-facing Rust binary accepts `pick` and `jump-back`. Internal `track` and `after-pane-exit` modes support history tracking and shell-exit focus recovery through manifest hooks. The picker, jump-back, and pane-exit handling share the same tracker rather than implementing separate history rules.
 - Implement the commands in one Rust binary. Herdr and fzf remain external runtime tools; Rust parses Herdr JSON instead of requiring jq. The Cargo build output must be installed beside the plugin manifest as `herdr-sessionizer`.
 - The manifest identifies the plugin as `user.herdr-sessionizer`, display name `Herdr Sessionizer History`, version `0.1.0`, minimum Herdr version `0.9.3`, with Linux and macOS declared as supported platforms.
 - Register `./herdr-sessionizer track` for plugin startup and `workspace.focused`, and `./herdr-sessionizer after-pane-exit` for `pane.exited`. The manifest does not register a picker key binding or automatically launch the picker.
@@ -79,7 +80,7 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 
 ### Directory discovery and workspace identity
 
-- Discover directory and symbolic-link entries under the user's `VAULT` and `devel` roots, using the existing find expression with directory depths one through three. Prune the development root's `Archive`, `.sync`, and `.SynologyWorkingDirectory` entries.
+- Discover directory and symbolic-link entries under the user's `VAULT` and `devel` roots at depths one through three. Prune the development root's `Archive`, `.sync`, and `.SynologyWorkingDirectory` entries.
 - Append the user's `dotfiles`, `Notes`, `Downloads`, `Work`, `devel`, and `Mail` directories explicitly. Preserve first occurrence when deduplicating path strings.
 - The roots and supplemental directory names are currently fixed conventions, not settings exposed by the plugin. Explicit entries are not checked for existence before presentation.
 - For each open user workspace, first use the first discovered path whose basename matches its label. Otherwise use the first pane belonging to that workspace, preferring `cwd` and then `foreground_cwd` when the former is null or absent. Do not search additional panes for a better fallback.
@@ -164,12 +165,11 @@ The opt-in `tests/live_workspace_exit.py` regression reproduces the native Ctrl+
 
 ### Additional checks not established by those tests
 
-- Existing-workspace selection, optional initial-tab rename, agent-count annotations, and successful selected-path output for both focus and creation.
+- The full live picker-to-warm-workspace flow, including terminal identity, selected directory, workspace/tab labels, history, and focus. The isolated shell-exit checks do not exercise fzf or prove all of these together.
 - Real fzf query reloads, result selection, separator handling, Ctrl-Space acceptance, no-match behavior, and cancellation status.
-- Discovery pruning and depth, symbolic links, missing roots or explicit directories, spaces and shell-sensitive characters, basename collisions, and fallback paths without matching labels.
+- Directory cases beyond the tested examples: missing or unreadable roots, missing explicit directories, basename collisions, and additional shell-sensitive path characters.
 - Server startup success and readiness exhaustion, malformed or failed Herdr responses, and failures after workspace creation.
-- Default state-directory behavior, full-history precedence over legacy projections, and target closure between jump-back's refresh and validation.
-- Temporary-directory removal and optional pane-close attempts on successful, empty, canceled, and failed picker runs.
+- Temporary-directory removal and optional pane-close attempts across all exit paths, beyond the tested failure-cleanup scenario.
 - Startup-hook delivery and lifecycle behavior beyond the tested Herdr 0.9.5/macOS shell-exit scenario. The isolated regression establishes manifest loading and pane-exit/focus hook delivery for that scenario only; Linux remains unverified.
 
 ## Out of Scope
