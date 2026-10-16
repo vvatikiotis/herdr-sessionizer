@@ -23,6 +23,120 @@ fn run(binary: &str, command: &str, root: &Path, bin: &Path) -> Output {
 }
 
 #[test]
+fn track_excludes_pool_from_focused_saved_and_legacy_history() {
+    for mode in ["saved", "legacy", "only-pool"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let state = root.join("state/herdr-sessionizer");
+        let bin = root.join("bin");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        let mut workspaces = vec![
+            serde_json::json!({"workspace_id":"pool", "label":"__herdr_shell_pool__", "focused":true}),
+        ];
+        if mode != "only-pool" {
+            workspaces.extend([
+                serde_json::json!({"workspace_id":"wA", "focused":false}),
+                serde_json::json!({"workspace_id":"wB", "focused":false}),
+            ]);
+        }
+        fs::write(
+            root.join("workspaces.json"),
+            serde_json::json!({"result":{"workspaces":workspaces}}).to_string(),
+        )
+        .unwrap();
+        executable(
+            &bin.join("herdr"),
+            "#!/bin/sh\ncat \"$FIXTURE/workspaces.json\"\n",
+        );
+        if mode == "legacy" {
+            fs::write(state.join("current-workspace"), "pool\n").unwrap();
+            fs::write(state.join("previous-workspace"), "wA\n").unwrap();
+        } else {
+            fs::write(state.join("workspace-history"), "pool\nwA\npool\nwB\n").unwrap();
+            fs::write(state.join("current-workspace"), "pool\n").unwrap();
+            fs::write(state.join("previous-workspace"), "pool\n").unwrap();
+        }
+        let output = run(env!("CARGO_BIN_EXE_herdr-sessionizer"), "track", root, &bin);
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let (history, current, previous) = match mode {
+            "saved" => ("wA\nwB\n", "wA\n", "wB\n"),
+            "legacy" => ("wA\n", "wA\n", ""),
+            _ => ("\n", "", ""),
+        };
+        assert_eq!(
+            fs::read_to_string(state.join("workspace-history")).unwrap(),
+            history,
+            "{mode}"
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("current-workspace")).unwrap(),
+            current,
+            "{mode}"
+        );
+        assert_eq!(
+            fs::read_to_string(state.join("previous-workspace")).unwrap(),
+            previous,
+            "{mode}"
+        );
+    }
+}
+
+#[test]
+fn jump_back_skips_pool_entries_already_in_saved_history() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\npool\nwB\n").unwrap();
+    fs::write(root.join("workspaces.json"), r#"{"result":{"workspaces":[{"workspace_id":"wA","focused":true},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false},{"workspace_id":"wB","focused":false}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'workspace focus')
+    [ "$3" = wB ] || exit 1
+    printf '%s\n' "$3" > "$FIXTURE/focused"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wA","focused":false},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false},{"workspace_id":"wB","focused":true}]}}' > "$FIXTURE/workspaces.json"
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    let output = run(
+        env!("CARGO_BIN_EXE_herdr-sessionizer"),
+        "jump-back",
+        root,
+        &bin,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(root.join("focused")).unwrap(), "wB\n");
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "wB\nwA\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("current-workspace")).unwrap(),
+        "wB\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("previous-workspace")).unwrap(),
+        "wA\n"
+    );
+}
+
+#[test]
 fn track_promotes_focused_workspace_and_deduplicates_open_history() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

@@ -10,6 +10,125 @@ fn script(path: &Path, contents: &str) {
 }
 
 #[test]
+fn standalone_sessionizer_creates_focuses_and_jumps_back_without_shell_pool() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path();
+    let home = root.join("home");
+    let old_project = home.join("devel/old project");
+    let new_project = home.join("devel/new project");
+    let bin = root.join("bin");
+    let plugin = root.join("plugins/herdr-sessionizer");
+    let state = root.join("state/herdr-sessionizer");
+    for path in [
+        &old_project,
+        &new_project,
+        &home.join("VAULT"),
+        &bin,
+        &plugin,
+        &state,
+    ] {
+        fs::create_dir_all(path).unwrap();
+    }
+    // Mirror the deployed layout but deliberately do not install the sibling tool.
+    let binary = plugin.join("herdr-sessionizer");
+    fs::copy(env!("CARGO_BIN_EXE_herdr-sessionizer"), &binary).unwrap();
+    assert!(!root.join("plugins/herdr-shell-pool").exists());
+    fs::write(state.join("workspace-history"), "pool\nold\n").unwrap();
+    fs::write(root.join("workspaces.json"), r#"{"result":{"workspaces":[{"workspace_id":"old","label":"old project","focused":false},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":true}]}}"#).unwrap();
+    script(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'workspace create')
+    printf '%s\n' "$@" >> "$FIXTURE/actions"
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"old","label":"old project","focused":false},{"workspace_id":"new","label":"new project","focused":true},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false}]}}' > "$FIXTURE/workspaces.json"
+    printf '%s\n' '{"result":{"tab":{"tab_id":"new-tab"}}}'
+    ;;
+  'tab rename') printf '%s\n' "$@" >> "$FIXTURE/actions" ;;
+  'workspace focus')
+    printf '%s\n' "$@" >> "$FIXTURE/actions"
+    case "$3" in
+      old) old=true; new=false ;;
+      new) old=false; new=true ;;
+      *) exit 1 ;;
+    esac
+    printf '{"result":{"workspaces":[{"workspace_id":"old","label":"old project","focused":%s},{"workspace_id":"new","label":"new project","focused":%s},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false}]}}\n' "$old" "$new" > "$FIXTURE/workspaces.json"
+    ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    script(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' \"$PICK_PATH\"\n",
+    );
+    let run = |action: &str, selection: &Path| {
+        let output = Command::new(&binary)
+            .arg(action)
+            .env("HOME", &home)
+            .env("FIXTURE", root)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("PICK_PATH", selection)
+            .env_remove("HERDR_SESSIONIZER_PANE_ID")
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{action}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        output
+    };
+    let created = run("pick", &new_project);
+    assert_eq!(
+        String::from_utf8(created.stdout).unwrap(),
+        format!("{}\n", new_project.display())
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "new\nold\n"
+    );
+    let creation = format!(
+        "workspace\ncreate\n--cwd\n{}\n--label\nnew project\n--focus\ntab\nrename\nnew-tab\nnew project\n",
+        new_project.display()
+    );
+    assert_eq!(fs::read_to_string(root.join("actions")).unwrap(), creation);
+
+    let focused = run("pick", &old_project);
+    assert_eq!(
+        String::from_utf8(focused.stdout).unwrap(),
+        format!("{}\n", old_project.display())
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "old\nnew\n"
+    );
+    let jumped = run("jump-back", &old_project);
+    assert!(jumped.stdout.is_empty());
+    assert_eq!(
+        fs::read_to_string(root.join("actions")).unwrap(),
+        format!("{creation}workspace\nfocus\nold\nworkspace\nfocus\nnew\n")
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "new\nold\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("current-workspace")).unwrap(),
+        "new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("previous-workspace")).unwrap(),
+        "old\n"
+    );
+}
+
+#[test]
 fn picker_delegates_new_workspace_and_preserves_directory_output_and_history() {
     let fixture = TempDir::new().unwrap();
     let root = fixture.path();

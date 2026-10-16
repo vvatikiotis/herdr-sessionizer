@@ -31,7 +31,7 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 9. As a terminal user, I want the current workspace listed after the previous workspace, so that I can recognize my current context.
 10. As a terminal user, I want older visited workspaces ordered by recency, so that frequently revisited tasks remain easy to find.
 11. As a terminal user, I want open workspaces without visit history included too, so that the picker does not hide existing tasks.
-12. As a terminal user, I want the internal shell-pool workspace omitted from the picker, so that implementation infrastructure is not offered as a project.
+12. As a terminal user, I want the internal shell-pool workspace excluded from the picker, visit history, and jump-back, so that implementation infrastructure is never treated as a project.
 13. As a terminal user, I want a workspace label matched to a discovered directory before using a pane's working directory, so that changing directories inside a pane does not redefine the project.
 14. As a terminal user, I want a pane-directory fallback when no discovered directory matches a workspace label, so that workspaces outside the discovery roots can still appear.
 15. As a terminal user, I want directories whose basenames already label open workspaces omitted from the unopened group, so that they are not offered as new workspaces.
@@ -64,7 +64,7 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 - Keep three command responsibilities: interactive selection, focus-history tracking, and jump-back. The user-facing Rust binary accepts `pick` and `jump-back`; the manifest invokes its `track` mode for lifecycle hooks. The picker and jump-back invoke the same tracker rather than implementing separate history rules.
 - Implement the commands in one Rust binary. Herdr and fzf remain external runtime tools; Rust parses Herdr JSON instead of requiring jq. The Cargo build output must be installed beside the plugin manifest as `herdr-sessionizer`.
 - The manifest identifies the plugin as `user.herdr-sessionizer`, display name `Herdr Sessionizer History`, version `0.1.0`, minimum Herdr version `0.9.3`, with Linux and macOS declared as supported platforms.
-- Register `./herdr-sessionizer track` for plugin startup and `workspace.focused`. The manifest does not register a picker key binding or automatically launch the picker.
+- Register `./herdr-sessionizer track` for plugin startup and `workspace.focused`, and `./herdr-sessionizer after-pane-exit` for `pane.exited`. The manifest does not register a picker key binding or automatically launch the picker.
 - The shell-pool executable is an optional integration. Look for `herdr-shell-pool/herdr-shell-pool-bin` beside the sessionizer plugin directory, resolved from the running executable's location. Keep the reserved workspace label `__herdr_shell_pool__` excluded from picker choices. No manifest dependency, key-binding change, or PATH lookup is added.
 
 ### Server and Herdr contracts
@@ -108,7 +108,15 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 - When full history is absent, seed it from the legacy current and previous projections in that order. An existing full-history file takes precedence, even if empty. If a refresh produces no identifiers, write one newline to the full-history file and empty projection files.
 - On each refresh, prepend focused workspace identifiers from the current Herdr response, then process stored history. Retain only identifiers still open and preserve each once. Do not add unvisited, unfocused workspaces to history merely because they are open.
 - Write full history through a temporary file in the state directory and rename it into place. Update the two projections afterward. This makes replacement of full history atomic, but does not make all three files a transaction or serialize concurrent invocations.
-- History tracking does not exclude the shell-pool workspace. A focused pool workspace can participate in history and jump-back even though the picker hides it.
+- Exclude workspaces labelled `__herdr_shell_pool__` before collecting focused or open history identifiers. Never record the pool as a visit, even when it is focused. Remove saved pool entries and legacy current/previous pool entries during refresh, then rebuild both projections from the remaining user-workspace history. If only the pool remains, retain no current or previous user workspace.
+
+### Focus after shell exit
+
+- Herdr 0.9.5 emits `pane.exited` before removing a dead pane; it does not emit `workspace.closed` or `workspace.focused` for the resulting automatic workspace removal. Watching workspace-focus events alone cannot correct Ctrl+d fallback.
+- The pane-exit command reads the exiting pane and workspace identifiers from `HERDR_PLUGIN_EVENT_JSON`. Poll the pane list until the pane is absent, with a two-second retry window, then refresh history.
+- Recheck workspace state. Only if the exiting workspace has disappeared and Herdr currently focuses the reserved pool workspace, focus the most recent surviving user workspace and refresh history again. If history has no valid target, use the first existing non-pool workspace.
+- Do not override another user workspace's focus, redirect an explicit pool selection through ordinary tracking, or redirect when only a pane closed and its workspace remains. If no user workspace remains, do not create one automatically.
+- The correction is asynchronous; Herdr may briefly focus the pool before the hook redirects it. It uses the pool label only and does not require the shell-pool executable.
 
 ### Jump-back and cleanup
 
@@ -127,7 +135,7 @@ The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and serv
 - Test the compiled Rust executable through its process boundary with temporary home/state directories and stub Herdr and fzf programs on `PATH`. No internal test interface is needed.
 - Assert observable candidate lists, focus/create/rename calls, selected-directory output, exit status, cleanup, and persistent history behavior. Avoid tests tied to helper-function names or intermediate variables.
 - Use stateful Herdr stubs for multi-step visit, closure, and toggle scenarios. Use an fzf stub to capture candidate input and return controlled selections.
-- Real-tool integration tests with Herdr and fzf are deferred until after the initial Rust implementation. Stubs do not establish actual fzf query behavior in a terminal or Herdr lifecycle-event delivery.
+- Stub tests do not establish actual fzf behavior or event delivery. An opt-in real-Herdr regression creates an isolated server, links the actual plugin manifest, exits a test shell with Ctrl+d, and verifies return to the original user workspace. It does not use or modify the user's live session or registry. Real fzf integration remains deferred.
 
 ### Existing automated coverage
 
@@ -150,15 +158,19 @@ The Rust integration tests execute the compiled binary through this boundary. Th
 
 A further executable-level test installs a fake sibling shell-pool tool and verifies that new-project selection delegates the selected directory and name, suppresses tool stdout, and refreshes history without ordinary workspace creation or tab rename. This checks the integration contract, not a live Herdr move.
 
+Two history regression tests verify pool exclusion: one covers a focused pool, saved pool entries, legacy state import, and a pool-only session; the other confirms jump-back skips a saved pool entry and preserves user-workspace history. A standalone-installation test copies sessionizer into its deployed directory layout without a sibling shell-pool directory. It verifies ordinary new-workspace creation and tab naming, existing-workspace focus, jump-back, selected-directory output, and history cleanup despite a focused, previously recorded pool workspace. Two pane-exit regression methods verify waiting for removal before restoring the most recent user workspace, and preserving focus for another user workspace, a surviving source workspace, or a pool-only session. The current Rust suite has twenty test methods.
+
+The opt-in `tests/live_workspace_exit.py` regression reproduces the native Ctrl+d focus fallback using Herdr 0.9.5 and the real plugin manifest. It was observed failing before the fix and passing afterward in an isolated server. A reserved-label stand-in workspace suffices; no shell-pool installation is needed.
+
 ### Additional checks not established by those tests
 
 - Existing-workspace selection, optional initial-tab rename, agent-count annotations, and successful selected-path output for both focus and creation.
 - Real fzf query reloads, result selection, separator handling, Ctrl-Space acceptance, no-match behavior, and cancellation status.
 - Discovery pruning and depth, symbolic links, missing roots or explicit directories, spaces and shell-sensitive characters, basename collisions, and fallback paths without matching labels.
 - Server startup success and readiness exhaustion, malformed or failed Herdr responses, and failures after workspace creation.
-- Default state-directory behavior, full-history precedence over legacy projections, target closure between jump-back's refresh and validation, and pool participation in jump-back.
+- Default state-directory behavior, full-history precedence over legacy projections, and target closure between jump-back's refresh and validation.
 - Temporary-directory removal and optional pane-close attempts on successful, empty, canceled, and failed picker runs.
-- Manifest loading and actual startup/focus-event delivery in supported Herdr versions. Linux/macOS support is declared, not independently demonstrated by the current unit tests.
+- Startup-hook delivery and lifecycle behavior beyond the tested Herdr 0.9.5/macOS shell-exit scenario. The isolated regression establishes manifest loading and pane-exit/focus hook delivery for that scenario only; Linux remains unverified.
 
 ## Out of Scope
 
@@ -180,8 +192,8 @@ A further executable-level test installs a fake sibling shell-pool tool and veri
 - Workspace and directory matching uses the first matching label/path in the order returned or discovered. Same-basename collisions are not resolved by canonical path.
 - A nonempty picker query with no matching open workspace targets the first unopened-entry position, even when no unopened entry matches. Cancellation may return nonzero. These are current implementation behaviors, not promises of a preferred user experience.
 - History replacement is atomic only for the full-history file. Tracker invocations are not serialized, so overlapping updates can race; the spec does not define a concurrency guarantee.
-- Rust tests use stub Herdr and fzf programs. Real-tool integration tests may follow after the initial Rust implementation.
+- Rust tests use stub Herdr and fzf programs; the opt-in Python shell-exit regression additionally uses a real disposable Herdr server.
 - Additional-check items identify behavior not established by automated tests. They do not, by themselves, define missing product requirements or approved feature work.
 - The document uses the to-spec section format and is stored locally; it is not published to an issue tracker.
-- All nine Bash test methods passed when the original implementation was inspected. Rust process-level tests now cover the replacement implementation; real Herdr/fzf integration tests remain deferred.
+- All nine Bash test methods passed when the original implementation was inspected. Rust process-level tests now cover the replacement implementation. A real Herdr shell-exit regression is available; real fzf integration remains deferred.
 - The plugin manifest's display name emphasizes history, but this specification covers the complete sessionizer, including the picker and jump-back entry points.

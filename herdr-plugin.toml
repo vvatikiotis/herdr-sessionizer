@@ -11,3 +11,7 @@ command = ["./herdr-sessionizer", "track"]
 [[events]]
 on = "workspace.focused"
 command = ["./herdr-sessionizer", "track"]
+
+[[events]]
+on = "pane.exited"
+command = ["./herdr-sessionizer", "after-pane-exit"]

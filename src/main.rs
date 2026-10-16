@@ -11,6 +11,7 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 fn main() {
     let result = match std::env::args().nth(1).as_deref() {
         Some("track") => track_workspace(),
+        Some("after-pane-exit") => after_pane_exit(),
         Some("pick") => pick(),
         Some("jump-back") => jump_back(),
         Some(command) => Err(format!("unknown command: {command}").into()),
@@ -496,6 +497,70 @@ fn jump_back() -> Result<(), Box<dyn Error>> {
     track_workspace()
 }
 
+fn after_pane_exit() -> Result<(), Box<dyn Error>> {
+    let event: Value = serde_json::from_str(&std::env::var("HERDR_PLUGIN_EVENT_JSON")?)?;
+    if event.get("event").and_then(Value::as_str) != Some("pane_exited") {
+        return Err("after-pane-exit requires a pane_exited event".into());
+    }
+    let pane_id = event["data"]["pane_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("pane exit event has no pane identifier")?;
+    let workspace_id = event["data"]["workspace_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())
+        .ok_or("pane exit event has no workspace identifier")?;
+
+    // Herdr 0.9.5 emits pane.exited before removing the pane/workspace.
+    // Observe removal rather than relying on a fixed delay before tracking.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        let panes = herdr_json(&["pane", "list"])?;
+        if !json_array(&panes, "panes")?
+            .iter()
+            .any(|pane| pane.get("pane_id").and_then(Value::as_str) == Some(pane_id))
+        {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err("timed out waiting for exited pane removal".into());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    track_workspace()?;
+    let workspaces = herdr_json(&["workspace", "list"])?;
+    let workspaces = json_array(&workspaces, "workspaces")?;
+    let workspace_remains = workspaces.iter().any(|workspace| {
+        workspace.get("workspace_id").and_then(Value::as_str) == Some(workspace_id)
+    });
+    let pool_focused = workspaces.iter().any(|workspace| {
+        workspace.get("label").and_then(Value::as_str) == Some("__herdr_shell_pool__")
+            && is_truthy(workspace.get("focused"))
+    });
+    if workspace_remains || !pool_focused {
+        return Ok(());
+    }
+    let recent = fs::read_to_string(state_dir()?.join("current-workspace"))?;
+    let users = workspaces
+        .iter()
+        .filter(|workspace| {
+            workspace.get("label").and_then(Value::as_str) != Some("__herdr_shell_pool__")
+        })
+        .filter_map(|workspace| workspace.get("workspace_id").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    // Prefer visit history; if none survives, use an existing user workspace.
+    if let Some(target) = users
+        .iter()
+        .copied()
+        .find(|id| *id == recent.trim())
+        .or_else(|| users.first().copied())
+    {
+        herdr_silent_stdout(&["workspace", "focus", target])?;
+        track_workspace()?;
+    }
+    Ok(())
+}
+
 fn track_workspace() -> Result<(), Box<dyn Error>> {
     let workspaces = herdr_json(&["workspace", "list"])?;
     let state_dir = state_dir()?;
@@ -516,7 +581,12 @@ fn track_workspace() -> Result<(), Box<dyn Error>> {
         Err(error) => return Err(error.into()),
     };
 
-    let open_workspaces = json_array(&workspaces, "workspaces")?;
+    let open_workspaces = json_array(&workspaces, "workspaces")?
+        .iter()
+        .filter(|workspace| {
+            workspace.get("label").and_then(Value::as_str) != Some("__herdr_shell_pool__")
+        })
+        .collect::<Vec<_>>();
     let open_ids = open_workspaces
         .iter()
         .filter_map(|workspace| workspace.get("workspace_id").and_then(Value::as_str))
