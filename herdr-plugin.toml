@@ -1,0 +1,13 @@
+id = "user.herdr-sessionizer"
+name = "Herdr Sessionizer History"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Track workspace focus changes for sessionizer jump-back"
+platforms = ["linux", "macos"]
+
+[[startup]]
+command = ["./herdr-sessionizer", "track"]
+
+[[events]]
+on = "workspace.focused"
+command = ["./herdr-sessionizer", "track"]
