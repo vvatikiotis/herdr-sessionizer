@@ -917,3 +917,97 @@ sed -n '2p' "$FIXTURE/candidates"
     assert!(candidates.contains("wA:p1"));
     assert!(candidates.contains("wA:p2"));
 }
+
+#[test]
+fn picker_reload_keeps_workspaces_and_filters_agents_by_search_fields() {
+    for (query, expected, unexpected) in [
+        ("project", &["review", "build"][..], &["deploy"][..]),
+        ("codex", &["build"][..], &["review", "deploy"][..]),
+    ] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let home = root.join("home");
+        let state = root.join("state/herdr-sessionizer");
+        let bin = root.join("bin");
+        fs::create_dir_all(home.join("VAULT/project")).unwrap();
+        fs::create_dir_all(home.join("VAULT/other")).unwrap();
+        fs::create_dir_all(home.join("devel")).unwrap();
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(state.join("workspace-history"), "project\nother\n").unwrap();
+        fs::write(
+            root.join("workspaces.json"),
+            r#"{"result":{"workspaces":[{"workspace_id":"wProject","label":"project","focused":true},{"workspace_id":"wOther","label":"other","focused":false}]}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("agents.json"),
+            r#"{"result":{"agents":[{"workspace_id":"wProject","tab_id":"t1","pane_id":"p1","display_name":"review","agent":"pi"},{"workspace_id":"wProject","tab_id":"t2","pane_id":"p2","display_name":"build","agent":"codex"},{"workspace_id":"wOther","tab_id":"t3","pane_id":"p3","display_name":"deploy","agent":"hermes"}]}}"#,
+        )
+        .unwrap();
+        executable(
+            &bin.join("herdr"),
+            r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  'workspace focus') exit 0 ;;
+  *) exit 1 ;;
+esac
+"###,
+        );
+        executable(
+            &bin.join("fzf"),
+            r###"#!/bin/bash
+input=$(cat)
+for arg in "$@"; do
+  if [[ "$arg" == --filter=* ]]; then
+    query=${arg#--filter=}
+    awk -F '\t' -v query="$query" 'BEGIN { query=tolower(query) } tolower($4) ~ query' <<< "$input"
+    exit 0
+  fi
+done
+printf '%s\n' "$input" > "$FIXTURE/initial"
+for arg in "$@"; do
+  if [[ "$arg" == --bind=change:reload:* ]]; then
+    command=${arg#--bind=change:reload:}
+    command=${command//\{q\}/$QUERY}
+    bash -c "$command" > "$FIXTURE/reloaded"
+    head -n 1 "$FIXTURE/reloaded"
+    exit 0
+  fi
+done
+exit 0
+"###,
+        );
+
+        let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+            .arg("pick")
+            .env("HOME", &home)
+            .env("FIXTURE", root)
+            .env("QUERY", query)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{query}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let reloaded = fs::read_to_string(root.join("reloaded")).unwrap();
+        assert!(
+            reloaded.contains("workspace|wProject"),
+            "reloaded for {query}: {reloaded:?}"
+        );
+        assert!(reloaded.contains("workspace|wOther"));
+        for label in expected {
+            assert!(reloaded.contains(label), "{query} should include {label}");
+        }
+        for label in unexpected {
+            assert!(!reloaded.contains(label), "{query} should omit {label}");
+        }
+    }
+}

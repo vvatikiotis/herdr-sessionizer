@@ -46,6 +46,7 @@ struct AgentRow {
     pane_id: String,
     label: String,
     display: String,
+    search: String,
 }
 
 fn pick_inner() -> Result<(), Box<dyn Error>> {
@@ -144,18 +145,19 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     for workspace in &open_workspaces {
         let padding = width.saturating_sub(workspace.display.chars().count());
         open_rows.push(format!(
-            "{}\t{}{}\tworkspace|{}",
+            "{}\t{}{}\tworkspace|{}\t{}",
             workspace.path,
             workspace.display,
             " ".repeat(padding),
-            workspace.id
+            workspace.id,
+            workspace.display
         ));
         let mut rows = agent_rows(workspace, agent_list);
         disambiguate_agent_labels(&mut rows);
         open_rows.extend(rows.into_iter().map(|row| {
             format!(
-                "{}\t  ↳ {}\tagent|{}|{}|{}",
-                workspace.path, row.display, row.workspace_id, row.tab_id, row.pane_id
+                "{}\t  ↳ {}\tagent|{}|{}|{}\t{}",
+                workspace.path, row.display, row.workspace_id, row.tab_id, row.pane_id, row.search
             )
         }));
     }
@@ -435,6 +437,11 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
             };
             label.push(' ');
             label.push_str(&status);
+            let search = match (display_name, agent_type) {
+                (Some(name), Some(kind)) => format!("{name} {kind}"),
+                (Some(name), None) | (None, Some(name)) => name.to_owned(),
+                (None, None) => String::new(),
+            };
             AgentRow {
                 workspace_id: workspace.id.clone(),
                 tab_id: agent
@@ -445,6 +452,7 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
                 pane_id: pane_id.to_owned(),
                 label: label.clone(),
                 display: label,
+                search,
             }
         })
         .collect()
@@ -482,12 +490,15 @@ fn run_fzf(
 ) -> Result<String, Box<dyn Error>> {
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
+    let filter_open = format!(
+        r#"if [[ -z {{q}} ]]; then cat {open}; else matches=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open}); awk -F'\t' -v matches="$matches" 'BEGIN {{ n=split(matches, lines, "\n"); for (i = 1; i <= n; i++) {{ split(lines[i], fields, "\t"); if (fields[3] != "") matched[fields[3]] = 1; }} }} {{ if (index($3, "workspace|") == 1) {{ print; next; }} split($3, parts, "|"); if (matched[$3] || matched["workspace|" parts[2]]) print; }}' {open}; fi"#
+    );
     let reload = format!(
-        r#"cat {open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories}"#
+        r#"{filter_open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories}"#
     );
     let first_directory = open_rows.len() + 2;
     let selection = format!(
-        r#"if [[ -n {{q}} ]]; then match=$(fzf --delimiter=$'\t' --nth=2 --filter={{q}} < {open} | head -n 1); if [[ -n "$match" ]]; then position=$(grep -Fxn -m 1 -- "$match" {open} | cut -d: -f1); printf 'pos(%s)\n' "$position"; else echo 'pos({first_directory})'; fi; fi"#
+        r#"if [[ -n {{q}} ]]; then match=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); if [[ -n "$match" ]]; then position=$(grep -Fxn -m 1 -- "$match" {open} | cut -d: -f1); printf 'pos(%s)\n' "$position"; else echo 'pos({first_directory})'; fi; fi"#
     );
     let mut input = fs::read_to_string(open_file)?;
     input.push('\n');
