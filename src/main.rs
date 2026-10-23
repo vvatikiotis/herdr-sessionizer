@@ -672,25 +672,19 @@ fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
     let mut child = Command::new("fzf")
         .args([
             "--disabled",
-            "--no-input",
             "--no-multi",
             "--header",
             error,
             "--bind=esc:abort,ctrl-c:abort,enter:abort,ctrl-m:abort",
         ])
+        // fzf reads keyboard input from the controlling terminal. The empty
+        // default command keeps the error view free of candidate rows.
         .stdin(Stdio::inherit())
         .stdout(terminal.map(Stdio::from).unwrap_or_else(Stdio::null))
+        .env("FZF_DEFAULT_COMMAND", "printf ''")
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|view_error| format!("{error}; failed to open error view: {view_error}"))?;
-    child
-        .stdin
-        .take()
-        .ok_or_else(|| format!("{error}; failed to provide error view input"))?
-        .write_all(b"\n")
-        .map_err(|view_error| {
-            format!("{error}; failed to provide error view input: {view_error}")
-        })?;
     let status = child
         .wait()
         .map_err(|view_error| format!("{error}; failed to wait for error view: {view_error}"))?;

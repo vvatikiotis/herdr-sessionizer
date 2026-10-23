@@ -28,9 +28,44 @@ if not BINARY.is_file() or not shutil.which("fzf"):
 def controlling_tty(slave: int) -> None:
     os.setsid()
     fcntl.ioctl(slave, termios.TIOCSCTTY, 0)
+    os.tcsetpgrp(slave, os.getpgrp())
 
 
-def run_case(root: Path, deployment: Path, env: dict[str, str], config: str, key: bytes) -> None:
+def read_screen(master: int, process: subprocess.Popen[bytes], screen: bytearray, deadline: float) -> None:
+    while time.monotonic() < deadline:
+        ready, _, _ = select.select([master], [], [], 0.1)
+        if not ready:
+            continue
+        try:
+            screen.extend(os.read(master, 65536))
+        except OSError:
+            return
+        if process.poll() is not None:
+            return
+
+
+def child_pids(process: subprocess.Popen[bytes]) -> list[str]:
+    result = subprocess.run(
+        ["ps", "-axo", "pid=,ppid="],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return [
+        pid
+        for line in result.stdout.splitlines()
+        for pid, parent in [line.split()]
+        if parent == str(process.pid)
+    ]
+
+
+def assert_cleanup(root: Path) -> None:
+    assert (root / "closed-pane").read_text() == "picker-pane\n"
+    scratch = root / "tmp"
+    assert not any(scratch.iterdir()), list(scratch.iterdir())
+
+
+def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key: bytes) -> None:
     (deployment / "directories.toml").write_text(config)
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
@@ -39,66 +74,67 @@ def run_case(root: Path, deployment: Path, env: dict[str, str], config: str, key
         cwd=root,
         env=env,
         stdin=slave,
-        stdout=slave,
-        stderr=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         close_fds=True,
+        preexec_fn=lambda: controlling_tty(slave),
     )
     os.close(slave)
     screen = bytearray()
     try:
         deadline = time.monotonic() + 10
-        while b"Directory discovery failed" not in screen:
-            if time.monotonic() >= deadline:
-                raise AssertionError(f"error view did not render: {bytes(screen)!r}")
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    chunk = os.read(master, 65536)
-                    screen.extend(chunk)
-                    if b"\x1b[6n" in chunk:
-                        os.write(master, b"\x1b[1;1R")
-                    if b"\x1b[?2004$p" in chunk:
-                        os.write(master, b"\x1b[?2004;1$y")
-                except OSError as error:
-                    raise AssertionError(f"PTY closed before error rendered: {error}") from error
-        time.sleep(0.2)
+        while b"Directory discovery failed" not in screen and b"Configuration" not in screen:
+            read_screen(master, process, screen, deadline)
+            if process.poll() is not None:
+                break
+        assert b"Directory discovery failed" in screen or b"Configuration" in screen, bytes(screen)
+        assert b"\x1b[?1049h" in screen, bytes(screen)
+        assert process.poll() is None, f"parent exited before dismissal: {bytes(screen)!r}"
+        assert child_pids(process), "fzf child was not alive before dismissal"
+        time.sleep(0.5)
         os.write(master, key)
-        deadline = time.monotonic() + 5
-        while process.poll() is None and time.monotonic() < deadline:
-            ready, _, _ = select.select([master], [], [], 0.1)
-            if ready:
-                try:
-                    chunk = os.read(master, 65536)
-                    screen.extend(chunk)
-                    if b"\x1b[6n" in chunk:
-                        os.write(master, b"\x1b[1;1R")
-                    if b"\x1b[?2004$p" in chunk:
-                        os.write(master, b"\x1b[?2004;1$y")
-                except OSError:
-                    break
-        if process.poll() is None:
-            raise AssertionError(f"dismissal did not complete for key {key!r}")
-        if process.returncode == 0:
-            raise AssertionError(f"dismissal returned success for key {key!r}")
-        if b"Directory discovery failed" not in screen:
-            raise AssertionError(f"original error missing from terminal output: {bytes(screen)!r}")
-        closed = root / "closed-pane"
-        if closed.read_text() != "picker-pane\n":
-            raise AssertionError(f"picker pane was not closed: {closed.read_text()!r}")
-        scratch = root / "tmp"
-        if any(scratch.iterdir()):
-            raise AssertionError(f"temporary picker files remain: {list(scratch.iterdir())}")
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired as error:
+            raise AssertionError(f"dismissal timed out: {bytes(screen)!r}") from error
+        stdout, stderr = process.communicate(timeout=1)
+        assert process.returncode != 0
+        assert stdout == b"", stdout
+        assert b"Directory discovery failed" in stderr, stderr
+        assert_cleanup(root)
     finally:
         if process.poll() is None:
-            try:
-                os.killpg(process.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            try:
-                process.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=2)
+            process.kill()
+            process.wait(timeout=2)
+        os.close(master)
+
+
+def run_launch_failure(root: Path, deployment: Path, env: dict[str, str]) -> None:
+    (deployment / "directories.toml").write_text("unknown = true\n")
+    master, slave = pty.openpty()
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
+    process = subprocess.Popen(
+        [str(deployment / "herdr-sessionizer"), "pick"],
+        cwd=root,
+        env=env,
+        stdin=slave,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        close_fds=True,
+        preexec_fn=lambda: controlling_tty(slave),
+    )
+    os.close(slave)
+    try:
+        stdout, stderr = process.communicate(timeout=5)
+        assert process.returncode != 0
+        assert stdout == b"", stdout
+        assert b"Directory discovery failed" in stderr, stderr
+        assert b"failed to open error view" in stderr, stderr
+        assert_cleanup(root)
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
         os.close(master)
 
 
@@ -143,10 +179,18 @@ with tempfile.TemporaryDirectory(prefix="sessionizer-config-error ", dir="/tmp")
         ("unknown = true\n", b"\x03"),
         ("unknown = true\n", b"\n"),
         ('[[roots]]\npath = "~/loop"\ndepth = 1\n', b"\x1b"),
+        ('[[roots]]\npath = "~/loop"\ndepth = 1\n', b"\x03"),
+        ('[[roots]]\npath = "~/loop"\ndepth = 1\n', b"\n"),
     ]
     (home / "loop").symlink_to("loop")
-    for index, (config, key) in enumerate(cases):
+    for config, key in cases:
         (root / "closed-pane").unlink(missing_ok=True)
-        run_case(root, deployment, env, config, key)
+        run_view(root, deployment, env, config, key)
 
-print("PASS: real fzf config/discovery error visibility, dismissal, status, output, and cleanup")
+    failing_fzf = command_bin / "fzf"
+    failing_fzf.write_text("#!/bin/sh\nprintf '%s\\n' fzf-launch-failed >&2\nexit 42\n")
+    failing_fzf.chmod(0o755)
+    (root / "closed-pane").unlink(missing_ok=True)
+    run_launch_failure(root, deployment, env)
+
+print("PASS: real fzf error visibility, dismissal, status, output, launch failure, and cleanup")
