@@ -114,7 +114,12 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 except OSError:
                     break
 
-    def run_picker(*input_chunks: bytes, wait_for_text: bytes = b"", timeout: float = 15.0):
+    def run_picker(
+        *input_chunks: bytes,
+        wait_for_text: bytes = b"",
+        wait_after_first: bytes = b"",
+        timeout: float = 15.0,
+    ):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen(
@@ -141,12 +146,24 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 raise RuntimeError(f"picker did not render the requested state: {bytes(output)[-3000:]!r}")
             if process.poll() is not None:
                 raise RuntimeError(f"picker exited before input (status {process.returncode}): {bytes(output)[-3000:]!r}")
-            for chunk in input_chunks:
+            for index, chunk in enumerate(input_chunks):
                 try:
                     os.write(master, chunk)
                 except OSError as error:
                     raise RuntimeError(f"picker input failed: {error}; output={bytes(output)[-3000:]!r}") from error
-            time.sleep(0.5)
+                if index == 0 and wait_after_first:
+                    read_pty(
+                        master,
+                        process,
+                        output,
+                        time.monotonic() + 5,
+                        lambda data: wait_after_first in data,
+                    )
+                    if wait_after_first not in output:
+                        raise RuntimeError(
+                            f"picker did not settle the filtered result: {bytes(output)[-3000:]!r}"
+                        )
+            time.sleep(0.2)
             read_pty(master, process, output, deadline)
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
@@ -196,7 +213,12 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             # This agent query matches the open beta workspace and agent, but
             # no unopened directory. A failed directory reload must not discard
             # those already-emitted workspace rows.
-            code, screen = run_picker(str(search_term).encode() + b"\x1b[B\r", wait_for_text=str(search_term).encode())
+            code, screen = run_picker(
+                str(search_term).encode(),
+                b"\x1b[B\r",
+                wait_for_text=str(search_term).encode(),
+                wait_after_first=str(search_term).encode(),
+            )
             if code != 0:
                 raise AssertionError(f"agent selection failed (status {code}): {screen[-2000:]!r}")
             if str(beta).encode() not in screen:
@@ -219,8 +241,19 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             try:
                 time.sleep(1)
                 (root / "fail-agent-focus").touch()
-                os.write(master, str(search_term).encode() + b"\x1b[B\r")
                 error_output = bytearray()
+                os.write(master, str(search_term).encode())
+                filtered_deadline = time.monotonic() + 5
+                while time.monotonic() < filtered_deadline and str(search_term).encode() not in error_output:
+                    ready, _, _ = select.select([master], [], [], 0.1)
+                    if ready:
+                        try:
+                            error_output.extend(os.read(master, 65536))
+                        except OSError:
+                            break
+                if str(search_term).encode() not in error_output:
+                    raise AssertionError(f"filtered agent result did not settle: {bytes(error_output)[-2000:]!r}")
+                os.write(master, b"\x1b[B\r")
                 deadline = time.monotonic() + 10
                 read_pty(
                     master,

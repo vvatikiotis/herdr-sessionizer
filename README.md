@@ -9,7 +9,16 @@ chmod 755 ./herdr-sessionizer.new &&
 mv -f ./herdr-sessionizer.new ./herdr-sessionizer
 ```
 
-The temporary-file-and-rename sequence avoids overwriting a running executable. Relink after changing the manifest so Herdr reads its current event hooks:
+The temporary-file-and-rename sequence avoids overwriting a running executable. The in-place repository install already includes `directories.toml`; keep that file beside the binary. For an external deployment, install the binary and a copy of `directories.toml` together without overwriting an existing user configuration:
+
+```sh
+install -m 755 target/release/herdr-sessionizer "$PLUGIN_DIR/herdr-sessionizer"
+if [ ! -e "$PLUGIN_DIR/directories.toml" ]; then
+  install -m 644 directories.toml "$PLUGIN_DIR/directories.toml"
+fi
+```
+
+Relink after changing the manifest so Herdr reads its current event hooks:
 
 ```sh
 herdr plugin link . --enabled
@@ -74,6 +83,6 @@ python3 tests/live_config_error.py
 
 The two Herdr regressions start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, focus moving to the expected workspace and agent pane across a created tab, paths containing spaces, and picker recovery after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
 
-The interactive checks passed on Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. In this isolated scenario, it checks that fzf displays the error and that selecting a workspace row recovers; the Rust stub tests cover stale/missing IDs and dismissal. `live_config_error.py` uses real fzf with stub Herdr and an isolated executable deployment to verify configuration-error visibility. Its cleanup assertions run when the PTY supports dismissal; on the observed macOS setup, fzf rendered the header but did not accept PTY dismissal, so the script reports a skip rather than claiming cleanup evidence. Linux and other Herdr/fzf versions remain unverified.
+The interactive checks passed on Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. In this isolated scenario, it checks that fzf displays the error and that selecting a workspace row recovers; the Rust stub tests cover stale/missing IDs and dismissal. `live_config_error.py` uses real fzf with stub Herdr and an isolated executable deployment to verify configuration-error visibility, normal dismissal, pane cleanup, and temporary-file cleanup. It uses `pty.fork` so the child receives a controlling terminal and fails if dismissal or cleanup cannot be verified. Linux and other Herdr/fzf versions remain unverified.
 
 The original Bash scripts and Python tests are retained under `legacy/` for reference. The plugin and current test suite do not use them.

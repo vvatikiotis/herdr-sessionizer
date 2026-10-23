@@ -285,6 +285,75 @@ fn candidate_paths_with_spaces_and_shell_punctuation_remain_data() {
 }
 
 #[test]
+fn discovery_error_is_error_only_even_with_existing_workspace_and_selection_attempt() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::create_dir_all(home.join("project")).unwrap();
+    symlink("loop", home.join("loop")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "[[roots]]\npath = \"~/loop\"\ndepth = 1\n",
+    )
+    .unwrap();
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"existing","label":"project","focused":true}]}}' ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[{"workspace_id":"existing","cwd":"/tmp/project"}]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'status server') exit 0 ;;
+  'workspace focus') printf '%s\n' "$*" >> "$FIXTURE/focused"; exit 0 ;;
+  *) exit 1 ;;
+ esac
+"#,
+    );
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > \"$FIXTURE/candidates\"\nprintf '%s\\n' '/tmp/project\\tproject\\tworkspace|existing'\n",
+    );
+
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "\n");
+    assert!(
+        !root.join("focused").exists(),
+        "error view allowed navigation"
+    );
+}
+
+#[test]
+fn shipped_configuration_matches_missing_file_defaults() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+
+    let without_file = run_pick(&home, &bin, root);
+    assert!(without_file.status.success());
+    let defaults = fs::read_to_string(root.join("candidates")).unwrap();
+    fs::copy(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("directories.toml"),
+        bin.join("directories.toml"),
+    )
+    .unwrap();
+    let with_file = run_pick(&home, &bin, root);
+    assert!(with_file.status.success());
+    assert_eq!(
+        defaults,
+        fs::read_to_string(root.join("candidates")).unwrap()
+    );
+}
+
+#[test]
 fn malformed_configuration_fails_strictly_but_unrelated_tracking_still_works() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -322,5 +391,33 @@ exit 0
         tracked.status.success(),
         "{}",
         String::from_utf8_lossy(&tracked.stderr)
+    );
+    let jumped = Command::new(bin.join("sessionizer"))
+        .arg("jump-back")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        jumped.status.success(),
+        "{}",
+        String::from_utf8_lossy(&jumped.stderr)
+    );
+    let after_exit = Command::new(bin.join("sessionizer"))
+        .arg("after-pane-exit")
+        .env("HOME", &home)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane_exited","data":{"pane_id":"gone","workspace_id":"gone-workspace"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert!(
+        after_exit.status.success(),
+        "{}",
+        String::from_utf8_lossy(&after_exit.stderr)
     );
 }

@@ -58,12 +58,12 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
-    let (available, discovery_error) = match discover_directories(&home) {
-        Ok(available) => (available, None),
-        Err(error) => (
-            Vec::new(),
-            Some(format!("Directory discovery failed: {error}")),
-        ),
+    let available = match discover_directories(&home) {
+        Ok(available) => available,
+        Err(error) => {
+            show_discovery_error(&format!("Directory discovery failed: {error}"))?;
+            return Ok(());
+        }
     };
     let workspace_list = json_array(&workspaces, "workspaces")?;
     let pane_list = json_array(&panes, "panes")?;
@@ -182,7 +182,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let directory_file = temporary.path.join("directories");
     fs::write(&open_file, lines_with_newline(&open_rows))?;
     fs::write(&directory_file, lines_with_newline(&directory_rows))?;
-    let mut error_header = discovery_error;
+    let mut error_header = None;
     let selection = loop {
         let selection = run_fzf(
             &open_file,
@@ -665,6 +665,25 @@ fn select_agent(
     herdr_silent_stdout(&["agent", "focus", pane_id])?;
     track_workspace()?;
     resolve_directory(&workspace.path)
+}
+
+fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
+    let mut child = Command::new("fzf")
+        .args(["--disabled", "--no-multi", "--header", error])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+    child
+        .stdin
+        .take()
+        .ok_or("failed to open fzf stdin")?
+        .write_all(b"Dismiss\n")?
+    let status = child.wait()?;
+    if !status.success() && status.code() != Some(130) {
+        return Err(format!("fzf exited with status {status}").into());
+    }
+    Ok(())
 }
 
 fn run_fzf(
