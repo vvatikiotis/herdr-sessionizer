@@ -121,6 +121,78 @@ fn configuration_is_reread_and_lookup_does_not_depend_on_caller_directory() {
 }
 
 #[test]
+fn built_in_defaults_stop_at_depth_three_but_editable_config_can_reach_depth_four() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    let deep = home.join("devel/one/two/three/four");
+    fs::create_dir_all(&deep).unwrap();
+
+    let fallback = run_pick(&home, &bin, root);
+    assert!(fallback.status.success());
+    let defaults = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(!defaults.contains(&format!("{}\t", deep.display())));
+
+    fs::write(
+        bin.join("directories.toml"),
+        "[[roots]]\npath = \"~/devel\"\ndepth = 4\n",
+    )
+    .unwrap();
+    let editable = run_pick(&home, &bin, root);
+    assert!(
+        editable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&editable.stderr)
+    );
+    let configured = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(configured.contains(&format!("{}\t", deep.display())));
+}
+
+#[test]
+fn workspace_directory_uses_first_pane_foreground_cwd_when_cwd_is_missing() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    let foreground = home.join("foreground");
+    let second = home.join("second");
+    fs::create_dir_all(&foreground).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"unavailable","focused":true}]}}' ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[{"workspace_id":"w1","cwd":null,"foreground_cwd":"'"$HOME"'/foreground"},{"workspace_id":"w1","cwd":"'"$HOME"'/second","foreground_cwd":null}]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'status server') exit 0 ;;
+  'workspace focus') printf '%s\n' "$*" >> "$FIXTURE/focused"; exit 0 ;;
+  'workspace create') printf '%s\n' '{"result":{}}'; exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    executable(
+        &bin.join("fzf"),
+        r#"#!/bin/sh
+printf '%s\t%s\t%s\t%s\n' "$HOME/foreground" unavailable 'workspace|w1' unavailable
+"#,
+    );
+
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", foreground.display())
+    );
+}
+
+#[test]
 fn defaults_and_empty_or_omitted_configuration_replace_choices_predictably() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -140,6 +212,44 @@ fn defaults_and_empty_or_omitted_configuration_replace_choices_predictably() {
     let omitted = fs::read_to_string(root.join("candidates")).unwrap();
     assert!(omitted.contains(&format!("{}\t", home.join("explicit").display())));
     assert!(!omitted.contains("default-project"));
+}
+
+#[test]
+fn unavailable_explicit_inclusion_fails_before_focus_or_creation() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "include = [\"~/not-available\"]\n",
+    )
+    .unwrap();
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[]}}' ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'status server') exit 0 ;;
+  'workspace focus'|'workspace create') printf '%s\n' "$*" >> "$FIXTURE/actions"; exit 1 ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    executable(
+        &bin.join("fzf"),
+        r#"#!/bin/sh
+printf '%s\t%s\t%s\n' "$HOME/not-available" "$HOME/not-available" 'directory|not-available'
+"#,
+    );
+
+    let output = run_pick(&home, &bin, root);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("cannot enter directory"));
+    assert!(output.stdout.is_empty());
+    assert!(!root.join("actions").exists());
 }
 
 #[test]
@@ -268,6 +378,47 @@ fn configured_symlinks_validate_targets_but_explicit_inclusions_remain_unchecked
     assert!(candidates.contains(&format!("{}\t", home.join("target").display())));
     assert!(!candidates.contains(&format!("{}\t", home.join("file-link").display())));
     assert!(candidates.contains(&format!("{}\t", home.join("broken-link").display())));
+}
+
+#[test]
+fn permission_denied_fixtures_are_checked_or_reported_as_unsupported() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    let protected = home.join("protected");
+    fs::create_dir_all(&protected).unwrap();
+    fs::set_permissions(&protected, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "[[roots]]\npath = \"~/protected\"\ndepth = 1\n",
+    )
+    .unwrap();
+    let output = run_pick(&home, &bin, root);
+    fs::set_permissions(&protected, fs::Permissions::from_mode(0o755)).unwrap();
+    let denied_root = !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("Directory discovery failed");
+    let target = home.join("protected-target");
+    fs::create_dir_all(&target).unwrap();
+    symlink(&target, home.join("protected-link")).unwrap();
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "[[roots]]\npath = \"~/\"\ndepth = 1\n",
+    )
+    .unwrap();
+    let target_output = run_pick(&home, &bin, root);
+    fs::set_permissions(&target, fs::Permissions::from_mode(0o755)).unwrap();
+    let denied_target = !target_output.status.success()
+        && String::from_utf8_lossy(&target_output.stderr).contains("Directory discovery failed");
+    if !denied_root {
+        eprintln!("permission-denied root fixture is unsupported on this host");
+    }
+    if !denied_target {
+        eprintln!("permission-denied symlink-target fixture is unsupported on this host");
+    }
 }
 
 #[test]
