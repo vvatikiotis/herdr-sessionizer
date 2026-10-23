@@ -125,9 +125,25 @@ fn malformed_configuration_fails_strictly_but_unrelated_tracking_still_works() {
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
     fs::write(bin.join("directories.toml"), "unknown = true\n").unwrap();
+    executable(
+        &bin.join("fzf"),
+        r#"#!/bin/sh
+printf '%s\n' "$*" > "$FIXTURE/fzf-args"
+cat > "$FIXTURE/candidates"
+exit 0
+"#,
+    );
     let output = run_pick(&home, &bin, root);
-    assert!(!output.status.success());
-    assert!(String::from_utf8_lossy(&output.stderr).contains("unknown field"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let fzf_args = fs::read_to_string(root.join("fzf-args")).unwrap();
+    assert!(fzf_args.contains("--header"));
+    assert!(fzf_args.contains("Directory discovery failed"));
+    assert!(fzf_args.contains("unknown field"));
+    assert!(!fzf_args.contains("~/VAULT"));
 
     let tracked = Command::new(bin.join("sessionizer"))
         .arg("track")

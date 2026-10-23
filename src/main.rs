@@ -58,7 +58,13 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
-    let available = discover_directories(&home)?;
+    let (available, discovery_error) = match discover_directories(&home) {
+        Ok(available) => (available, None),
+        Err(error) => (
+            Vec::new(),
+            Some(format!("Directory discovery failed: {error}")),
+        ),
+    };
     let workspace_list = json_array(&workspaces, "workspaces")?;
     let pane_list = json_array(&panes, "panes")?;
     let agent_list = json_array(&agents, "agents")?;
@@ -176,7 +182,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let directory_file = temporary.path.join("directories");
     fs::write(&open_file, lines_with_newline(&open_rows))?;
     fs::write(&directory_file, lines_with_newline(&directory_rows))?;
-    let mut error_header = None;
+    let mut error_header = discovery_error;
     let selection = loop {
         let selection = run_fzf(
             &open_file,
@@ -710,6 +716,11 @@ fn run_fzf(
         .write_all(input.as_bytes())?;
     let output = child.wait_with_output()?;
     if !output.status.success() {
+        // fzf uses 130 for an ordinary Escape/Ctrl-C dismissal. Treat it as
+        // a normal picker close so temporary panes can clean themselves up.
+        if output.status.code() == Some(130) {
+            return Ok(String::new());
+        }
         return Err(format!("fzf exited with status {}", output.status).into());
     }
     Ok(String::from_utf8(output.stdout)?
