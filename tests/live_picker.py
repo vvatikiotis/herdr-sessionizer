@@ -19,6 +19,7 @@ import pty
 import struct
 import shutil
 import select
+import socket as unix_socket
 import termios
 import subprocess
 import tempfile
@@ -76,12 +77,20 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         "printf '%s\\n' \"$*\" >> \"$FIXTURE/herdr-wrapper.log\"\n"
         "if [ \"$1 $2\" = \"agent focus\" ] && [ -f \"$FIXTURE/fail-agent-focus\" ]; then exit 1; fi\n"
         "if [ \"$1 $2\" = \"workspace list\" ] && [ -f \"$FIXTURE/add-omitted-workspace\" ]; then\n"
-        "  \"$REAL_HERDR\" \"$@\" | python3 -c 'import json,sys; d=json.load(sys.stdin); d[\"result\"][\"workspaces\"].append({\"workspace_id\":\"omitted\",\"label\":\"orphan\"}); print(json.dumps(d))'\n"
+        "  \"$REAL_HERDR\" \"$@\" | python3 -c 'import json,sys,os; d=json.load(sys.stdin); omitted={\"workspace_id\":\"omitted\",\"label\":\"orphan\"}; d[\"result\"][\"workspaces\"]=[omitted] if os.path.exists(os.path.join(os.environ[\"FIXTURE\"],\"only-omitted-workspace\")) else d[\"result\"][\"workspaces\"]+[omitted]; print(json.dumps(d))'\n"
         "  exit $?\n"
         "fi\n"
         "exec \"$REAL_HERDR\" \"$@\"\n"
     )
     (command_bin / "herdr").chmod(0o755)
+    (command_bin / "fzf").write_text(
+        "#!/bin/sh\n"
+        "for argument in \"$@\"; do\n"
+        "  case \"$argument\" in --filter=*) exec \"$REAL_FZF\" \"$@\";; esac\n"
+        "done\n"
+        "exec \"$REAL_FZF\" \"$@\" --listen=127.0.0.1:$FZF_TEST_PORT 2>>\"$FIXTURE/fzf-wrapper.log\"\n"
+    )
+    (command_bin / "fzf").chmod(0o755)
     shutil.copy2(args.binary, plugin / "herdr-sessionizer")
     shutil.copy2(PROJECT / "herdr-plugin.toml", plugin / "herdr-plugin.toml")
     socket = root / "config/herdr/sessions" / session / "herdr.sock"
@@ -96,6 +105,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         TERM="xterm-256color",
         FIXTURE=str(root),
         REAL_HERDR=herdr,
+        REAL_FZF=fzf,
         PATH=f"{command_bin}:{os.environ['PATH']}",
     )
 
@@ -127,17 +137,53 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 except OSError:
                     break
 
+    active_fzf_port = [None]
+    def fzf_state():
+        if active_fzf_port[0] is None:
+            return None
+        request = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
+        try:
+            request.settimeout(0.5)
+            request.connect(("127.0.0.1", active_fzf_port[0]))
+            response = request.recv(65536)
+        except OSError:
+            return None
+        finally:
+            request.close()
+        try:
+            return json.loads(response.split(b"\r\n\r\n", 1)[1])
+        except (IndexError, json.JSONDecodeError):
+            return None
+
+    def wait_for_fzf_state(predicate, description: str, timeout: float = 5.0):
+        state = None
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            state = fzf_state()
+            if state is not None and predicate(state):
+                return state
+            time.sleep(0.05)
+        wrapper = (root / "fzf-wrapper.log").read_text() if (root / "fzf-wrapper.log").exists() else ""
+        raise RuntimeError(f"timed out waiting for {description}: {state!r}; wrapper={wrapper!r}")
+
     def run_picker(
         *input_chunks: bytes,
         wait_for_text: bytes = b"",
         wait_after_first: bytes = b"",
+        settled_query: bytes | None = None,
+        settled_state: list | None = None,
         timeout: float = 15.0,
     ):
+        listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        active_fzf_port[0] = listener.getsockname()[1]
+        listener.close()
+        picker_env = {**env, "FZF_TEST_PORT": str(active_fzf_port[0])}
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
         process = subprocess.Popen(
             [str(plugin / "herdr-sessionizer"), "pick"],
-            env=env,
+            env=picker_env,
             cwd=root,
             stdin=slave,
             stdout=slave,
@@ -158,6 +204,13 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             )
             if wait_for_text and wait_for_text not in output:
                 raise RuntimeError(f"picker did not render the requested state: {bytes(output)[-3000:]!r}")
+            if settled_query is not None:
+                state = wait_for_fzf_state(
+                    lambda state: state.get("query") == settled_query.decode(),
+                    f"fzf query {settled_query!r} to settle",
+                )
+                if settled_state is not None:
+                    settled_state.append(state)
             if process.poll() is not None:
                 raise RuntimeError(f"picker exited before input (status {process.returncode}): {bytes(output)[-3000:]!r}")
             for index, chunk in enumerate(input_chunks):
@@ -177,10 +230,15 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                         raise RuntimeError(
                             f"picker did not settle the filtered result: {bytes(output)[-3000:]!r}"
                         )
-                    # The marker is observable readiness; drain one bounded
-                    # settling window before accepting so reload/result-final
-                    # processing cannot race the key.
-                    read_pty(master, process, output, time.monotonic() + 0.25)
+                    # The marker is observable readiness; fzf state is the
+                    # readiness signal, not accumulated terminal output.
+                    if settled_query is not None:
+                        state = wait_for_fzf_state(
+                            lambda state: state.get("query") == settled_query.decode(),
+                            f"fzf query {settled_query!r} to settle",
+                        )
+                        if settled_state is not None:
+                            settled_state.append(state)
             read_pty(master, process, output, deadline)
             if process.poll() is None:
                 raise RuntimeError(f"picker did not exit after input: {bytes(output)[-3000:]!r}")
@@ -226,21 +284,40 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             # it must leave the real candidate list unselected and must not
             # navigate or create a workspace.
             (root / "add-omitted-workspace").touch()
+            (root / "only-omitted-workspace").touch()
+            original_config = config.read_text()
+            config.write_text("include = []\n")
             wrapper_log = root / "herdr-wrapper.log"
             before_warning = wrapper_log.read_text() if wrapper_log.exists() else ""
-            code, screen = run_picker(b"Hidden workspaces", b"\x1b", wait_for_text=b"Hidden workspaces")
+            code, screen = run_picker(b"no-such-candidate", b"\r", wait_for_text=b"Hidden workspaces")
             after_warning = wrapper_log.read_text() if wrapper_log.exists() else ""
-            if code != 0 or b"Hidden workspaces (directory unavailable): orphan" not in screen:
-                raise AssertionError(f"omitted-workspace warning was not visible: {screen[-3000:]!r}")
+            if b"Hidden workspaces (directory unavailable): orphan" not in screen:
+                raise AssertionError(f"omitted-workspace warning was selectable: {screen[-3000:]!r}")
             warning_actions = after_warning[len(before_warning):]
-            if any(line.startswith(("workspace focus", "workspace create")) for line in warning_actions.splitlines()):
-                raise AssertionError(f"warning was treated as a selectable candidate: {warning_actions!r}")
+            warning_navigation = [
+                line for line in warning_actions.splitlines()
+                if line.startswith(("workspace focus", "workspace create", "tab focus", "agent focus"))
+            ]
+            if warning_navigation:
+                raise AssertionError(f"warning was treated as a selectable candidate: {warning_navigation!r}")
+            config.write_text(original_config)
+            (root / "only-omitted-workspace").unlink()
             (root / "add-omitted-workspace").unlink()
 
             def assert_retained(query: bytes, required: tuple[bytes, ...]) -> None:
-                code, screen = run_picker(query, b"\x1b", wait_for_text=required[0])
-                if code != 0 or any(row not in screen for row in required):
-                    raise AssertionError(f"query {query!r} lost retained rows: {screen[-3000:]!r}")
+                state = []
+                code, screen = run_picker(
+                    query,
+                    b"\x1b",
+                    wait_for_text=required[0],
+                    settled_query=query,
+                    settled_state=state,
+                )
+                if code != 0:
+                    raise AssertionError(f"query {query!r} failed: {screen[-3000:]!r}")
+                visible = [match.get("text", "") for match in state[-1].get("matches", [])]
+                if any(not any(row.decode() in text for text in visible) for row in required):
+                    raise AssertionError(f"query {query!r} lost retained rows: {visible!r}")
 
             # Check rendered row identities for empty, single-letter,
             # multi-row, agent, directory-only, and zero-directory-match queries.
@@ -253,18 +330,29 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
 
             # This query matches two open workspaces, but no unopened directory.
             # The reload must emit both rows despite macOS awk's multiline -v bug.
-            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
-            if code != 0 or b"~/VAULT/beta" not in screen or b"~/VAULT/beta-two" not in screen:
+            beta_state = []
+            code, screen = run_picker(
+                b"beta", b"\r", wait_for_text=b"beta", wait_after_first=b"beta",
+                settled_query=b"beta", settled_state=beta_state,
+            )
+            beta_rows = [match["text"] for match in beta_state[-1]["matches"]]
+            if code != 0 or not all(
+                any(path.decode() in row for row in beta_rows)
+                for path in (b"~/VAULT/beta", b"~/VAULT/beta-two")
+            ):
                 raise AssertionError(f"workspace reload did not retain both beta rows: {screen[-3000:]!r}")
 
             # This agent query matches the open beta workspace and agent, but
             # no unopened directory. A failed directory reload must not discard
             # those already-emitted workspace rows.
+            agent_state = []
             code, screen = run_picker(
                 str(search_term).encode(),
                 b"\r",
                 wait_for_text=str(search_term).encode(),
                 wait_after_first=str(search_term).encode(),
+                settled_query=str(search_term).encode(),
+                settled_state=agent_state,
             )
             if code != 0:
                 raise AssertionError(f"agent selection failed (status {code}): {screen[-2000:]!r}")
@@ -283,13 +371,28 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     if line.startswith(("workspace focus", "workspace create", "tab focus", "agent focus"))
                 ]
 
-            # Ctrl-Space is the picker acceptance key. Use the settled initial
-            # list here so the assertion proves acceptance, not query timing.
+            # Ctrl-Space is the picker acceptance key. Match the accepted
+            # row identity from fzf's current state to the exact Herdr action.
+            ctrl_state = []
             before_ctrl_space = navigation_calls()
-            code, screen = run_picker(b"\x00", wait_for_text=b"~/VAULT/alpha")
+            code, screen = run_picker(
+                b"\x00", wait_for_text=b"~/VAULT/alpha", settled_query=b"", settled_state=ctrl_state
+            )
             after_ctrl_space = navigation_calls()
-            if code != 0 or str(beta).encode() not in screen or after_ctrl_space == before_ctrl_space:
-                raise AssertionError(f"Ctrl-Space did not accept the settled row: {screen[-3000:]!r}")
+            current = ctrl_state[-1]["current"]
+            identity = current["text"].split("\t")[2]
+            expected = (
+                [f"workspace focus {identity.split('|')[1]}"]
+                if identity.startswith("workspace|")
+                else [
+                    f"tab focus {identity.split('|')[2]}",
+                    f"agent focus {identity.split('|')[3]}",
+                ]
+            )
+            if code != 0 or after_ctrl_space[len(before_ctrl_space):] != expected:
+                raise AssertionError(
+                    f"Ctrl-Space accepted {identity!r} with actions {after_ctrl_space[len(before_ctrl_space):]!r}"
+                )
 
             # Escape cancels without a navigation action. A settled query with
             # no candidate remains a non-successful fzf result, distinct from
@@ -307,6 +410,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 b"\r",
                 wait_for_text=b"~/VAULT/alpha",
                 wait_after_first=b"epsilon",
+                settled_query=b"epsilon",
             )
             after_directory = navigation_calls()
             if code != 0 or not any(
@@ -320,11 +424,16 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 raise AssertionError(f"real fzf transcript omitted status text [{status}]: {screen[-3000:]!r}")
 
             # Keep the picker snapshot while making its captured pane stale.
+            listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
+            listener.bind(("127.0.0.1", 0))
+            active_fzf_port[0] = listener.getsockname()[1]
+            listener.close()
+            picker_env = {**env, "FZF_TEST_PORT": str(active_fzf_port[0])}
             master, slave = pty.openpty()
             fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
             picker = subprocess.Popen(
                 [str(plugin / "herdr-sessionizer"), "pick"],
-                env=env,
+                env=picker_env,
                 cwd=root,
                 stdin=slave,
                 stdout=slave,
@@ -333,10 +442,14 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             )
             os.close(slave)
             try:
-                time.sleep(1)
+                wait_for_fzf_state(lambda state: state.get("query") == "", "stale picker initial state")
                 (root / "fail-agent-focus").touch()
                 error_output = bytearray()
                 os.write(master, str(search_term).encode())
+                wait_for_fzf_state(
+                    lambda state: state.get("query") == str(search_term),
+                    "stale picker agent query",
+                )
                 filtered_deadline = time.monotonic() + 5
                 while time.monotonic() < filtered_deadline and str(search_term).encode() not in error_output:
                     ready, _, _ = select.select([master], [], [], 0.1)
@@ -365,9 +478,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 # Selecting another row retries the same snapshot and dismisses
                 # the error without creating or retargeting an agent.
                 os.write(master, b"\x15")
-                time.sleep(0.2)
                 os.write(master, b"beta")
-                time.sleep(0.2)
+                wait_for_fzf_state(lambda state: state.get("query") == "beta", "stale picker recovery query")
                 os.write(master, b"\r")
                 deadline = time.monotonic() + 10
                 read_pty(master, picker, error_output, deadline)
@@ -387,8 +499,13 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             (root / "state/herdr-sessionizer/workspace-history").write_text(
                 f"{alpha_workspace['workspace']['workspace_id']}\n{beta_workspace['workspace']['workspace_id']}\n"
             )
-            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
-            if code != 0 or str(alpha).encode() not in screen:
+            cross_group_state = []
+            code, screen = run_picker(
+                b"beta", b"\r", wait_for_text=b"beta", wait_after_first=b"beta",
+                settled_query=b"beta", settled_state=cross_group_state,
+            )
+            cross_group_rows = [match["text"] for match in cross_group_state[-1]["matches"]]
+            if code != 0 or not any(str(alpha).encode().decode() in row for row in cross_group_rows):
                 raise AssertionError(f"cross-group search did not choose the earlier agent: {screen[-3000:]!r}")
             focused = snapshot()
             if not any(item.get("workspace_id") == alpha_workspace["workspace"]["workspace_id"] and item.get("focused") for item in focused["workspaces"]):
