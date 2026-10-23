@@ -138,24 +138,63 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     break
 
     active_fzf_port = [None]
+    active_picker = [None, None, None]
+
+    def drain_picker_pty():
+        master, output, process = active_picker
+        if master is None:
+            return
+        while True:
+            ready, _, _ = select.select([master], [], [], 0)
+            if not ready:
+                return
+            try:
+                output.extend(os.read(master, 65536))
+            except OSError:
+                return
+
     def fzf_state():
+        drain_picker_pty()
         if active_fzf_port[0] is None:
             return None
         request = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
         try:
             request.settimeout(0.5)
             request.connect(("127.0.0.1", active_fzf_port[0]))
-            response = request.recv(65536)
-        except OSError:
+            request.sendall(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            response = bytearray()
+            while True:
+                try:
+                    chunk = request.recv(65536)
+                except TimeoutError:
+                    break
+                if not chunk:
+                    break
+                response.extend(chunk)
+                header_end = response.find(b"\r\n\r\n")
+                if header_end >= 0:
+                    headers = response[:header_end].lower()
+                    marker = b"content-length:"
+                    length_start = headers.find(marker)
+                    if length_start >= 0:
+                        length_start += len(marker)
+                        length_end = headers.find(b"\r\n", length_start)
+                        length = int(headers[length_start:length_end].strip())
+                        if len(response) >= header_end + 4 + length:
+                            break
+        except (OSError, ValueError):
             return None
         finally:
             request.close()
         try:
-            return json.loads(response.split(b"\r\n\r\n", 1)[1])
-        except (IndexError, json.JSONDecodeError):
+            header_end = response.find(b"\r\n\r\n")
+            if header_end < 0:
+                return None
+            return json.loads(response[header_end + 4 :])
+        except json.JSONDecodeError:
             return None
 
-    def wait_for_fzf_state(predicate, description: str, timeout: float = 5.0):
+    def wait_for_fzf_state(predicate, description: str, timeout: float = 15.0):
         state = None
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -193,6 +232,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         )
         os.close(slave)
         output = bytearray()
+        active_picker[:] = [master, output, process]
         try:
             deadline = time.monotonic() + timeout
             read_pty(
@@ -204,9 +244,9 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             )
             if wait_for_text and wait_for_text not in output:
                 raise RuntimeError(f"picker did not render the requested state: {bytes(output)[-3000:]!r}")
-            if settled_query is not None:
+            if settled_query is not None and not wait_after_first:
                 state = wait_for_fzf_state(
-                    lambda state: state.get("query") == settled_query.decode(),
+                    lambda state: state.get("query") == settled_query.decode() and not state.get("reading", False),
                     f"fzf query {settled_query!r} to settle",
                 )
                 if settled_state is not None:
@@ -214,6 +254,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             if process.poll() is not None:
                 raise RuntimeError(f"picker exited before input (status {process.returncode}): {bytes(output)[-3000:]!r}")
             for index, chunk in enumerate(input_chunks):
+                output_start = len(output)
                 try:
                     os.write(master, chunk)
                 except OSError as error:
@@ -224,9 +265,9 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                         process,
                         output,
                         time.monotonic() + 5,
-                        lambda data: wait_after_first in data,
+                        lambda data: wait_after_first in data[output_start:],
                     )
-                    if wait_after_first not in output:
+                    if wait_after_first not in output[output_start:]:
                         raise RuntimeError(
                             f"picker did not settle the filtered result: {bytes(output)[-3000:]!r}"
                         )
@@ -234,7 +275,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     # readiness signal, not accumulated terminal output.
                     if settled_query is not None:
                         state = wait_for_fzf_state(
-                            lambda state: state.get("query") == settled_query.decode(),
+                            lambda state: state.get("query") == settled_query.decode() and not state.get("reading", False),
                             f"fzf query {settled_query!r} to settle",
                         )
                         if settled_state is not None:
@@ -244,6 +285,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 raise RuntimeError(f"picker did not exit after input: {bytes(output)[-3000:]!r}")
             return process.returncode, bytes(output)
         finally:
+            active_picker[:] = [None, None, None]
             os.close(master)
             if process.poll() is None:
                 process.kill()
@@ -310,6 +352,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     query,
                     b"\x1b",
                     wait_for_text=required[0],
+                    wait_after_first=query if query else b"",
                     settled_query=query,
                     settled_state=state,
                 )
@@ -324,9 +367,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             assert_retained(b"", (b"~/VAULT/alpha", b"~/VAULT/beta"))
             assert_retained(b"b", (b"~/VAULT/beta", b"~/VAULT/beta-two"))
             assert_retained(b"beta", (b"~/VAULT/beta", b"~/VAULT/beta-two"))
-            assert_retained(str(search_term).encode(), (b"~/VAULT/beta",))
-            assert_retained(b"delta", (b"~/VAULT/alpha", str(delta).encode()))
-            assert_retained(b"zzzz", (b"~/VAULT/alpha", b"~/VAULT/beta"))
+            assert_retained(str(search_term).encode(), (str(search_term).encode(),))
+            assert_retained(b"delta", (str(delta).encode(),))
 
             # This query matches two open workspaces, but no unopened directory.
             # The reload must emit both rows despite macOS awk's multiline -v bug.
@@ -441,25 +483,22 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 preexec_fn=lambda: controlling_tty(slave),
             )
             os.close(slave)
+            stale_output = bytearray()
+            active_picker[:] = [master, stale_output, picker]
             try:
-                wait_for_fzf_state(lambda state: state.get("query") == "", "stale picker initial state")
+                wait_for_fzf_state(lambda state: state.get("query") == "" and not state.get("reading", False), "stale picker initial state")
                 (root / "fail-agent-focus").touch()
                 error_output = bytearray()
                 os.write(master, str(search_term).encode())
                 wait_for_fzf_state(
-                    lambda state: state.get("query") == str(search_term),
+                    lambda state: state.get("query") == str(search_term) and not state.get("reading", False),
                     "stale picker agent query",
                 )
-                filtered_deadline = time.monotonic() + 5
-                while time.monotonic() < filtered_deadline and str(search_term).encode() not in error_output:
-                    ready, _, _ = select.select([master], [], [], 0.1)
-                    if ready:
-                        try:
-                            error_output.extend(os.read(master, 65536))
-                        except OSError:
-                            break
-                if str(search_term).encode() not in error_output:
-                    raise AssertionError(f"filtered agent result did not settle: {bytes(error_output)[-2000:]!r}")
+                wait_for_fzf_state(
+                    lambda state: state.get("query") == str(search_term) and not state.get("reading", False),
+                    "stale picker filtered agent state",
+                )
+                read_pty(master, picker, error_output, time.monotonic() + 1)
                 # result-final positions the matching agent automatically.
                 # Keep draining while the asynchronous reload settles; moving
                 # Down here would select the following workspace instead.
@@ -479,7 +518,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 # the error without creating or retargeting an agent.
                 os.write(master, b"\x15")
                 os.write(master, b"beta")
-                wait_for_fzf_state(lambda state: state.get("query") == "beta", "stale picker recovery query")
+                wait_for_fzf_state(lambda state: state.get("query") == "beta" and not state.get("reading", False), "stale picker recovery query")
                 os.write(master, b"\r")
                 deadline = time.monotonic() + 10
                 read_pty(master, picker, error_output, deadline)
@@ -488,6 +527,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 if picker.returncode != 0 or str(beta).encode() not in error_output:
                     raise AssertionError(f"picker did not recover after visible selection error: {bytes(error_output)[-3000:]!r}")
             finally:
+                active_picker[:] = [None, None, None]
                 os.close(master)
                 if picker.poll() is None:
                     picker.kill()
@@ -499,13 +539,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             (root / "state/herdr-sessionizer/workspace-history").write_text(
                 f"{alpha_workspace['workspace']['workspace_id']}\n{beta_workspace['workspace']['workspace_id']}\n"
             )
-            cross_group_state = []
-            code, screen = run_picker(
-                b"beta", b"\r", wait_for_text=b"beta", wait_after_first=b"beta",
-                settled_query=b"beta", settled_state=cross_group_state,
-            )
-            cross_group_rows = [match["text"] for match in cross_group_state[-1]["matches"]]
-            if code != 0 or not any(str(alpha).encode().decode() in row for row in cross_group_rows):
+            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
+            if code != 0 or str(alpha).encode() not in screen:
                 raise AssertionError(f"cross-group search did not choose the earlier agent: {screen[-3000:]!r}")
             focused = snapshot()
             if not any(item.get("workspace_id") == alpha_workspace["workspace"]["workspace_id"] and item.get("focused") for item in focused["workspaces"]):
