@@ -102,10 +102,16 @@ with tempfile.TemporaryDirectory(prefix="sessionizer-config-error ", dir="/tmp")
                 break
             time.sleep(0.05)
         else:
-            os.write(master, b"\x03")
-            waited, status = os.waitpid(pid, 0)
-            if waited != pid:
-                raise AssertionError("picker dismissal did not complete")
+            os.write(master, b"q")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                waited, status_value = os.waitpid(pid, os.WNOHANG)
+                if waited:
+                    status = status_value
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError("picker dismissal did not complete after Escape and q")
         return_code = os.waitstatus_to_exitcode(status)
         if return_code == 0:
             raise AssertionError("interrupt dismissal unexpectedly returned zero")
@@ -160,10 +166,16 @@ with tempfile.TemporaryDirectory(prefix="sessionizer-config-error ", dir="/tmp")
                 break
             time.sleep(0.05)
         else:
-            os.write(master, b"\x03")
-            waited, root_status = os.waitpid(pid, 0)
-            if waited != pid:
-                raise AssertionError("root-error dismissal did not complete")
+            os.write(master, b"q")
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                waited, status_value = os.waitpid(pid, os.WNOHANG)
+                if waited:
+                    root_status = status_value
+                    break
+                time.sleep(0.05)
+            else:
+                raise AssertionError("root-error dismissal did not complete after Escape and q")
         if os.waitstatus_to_exitcode(root_status) == 0:
             raise AssertionError("root-error dismissal unexpectedly returned zero")
         if (root / "closed-pane").read_text() != "picker-pane\n":

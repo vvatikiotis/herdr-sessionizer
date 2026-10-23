@@ -208,7 +208,7 @@ fn invalid_configuration_forms_are_visible_without_using_defaults() {
         fs::write(bin.join("directories.toml"), config).unwrap();
         executable(
             &bin.join("fzf"),
-            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\ncat > \"$FIXTURE/candidates\"\nexit 0\n",
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\n: > \"$FIXTURE/candidates\"\nexit 0\n",
         );
         let output = run_pick(&home, &bin, root);
         assert!(
@@ -218,7 +218,7 @@ fn invalid_configuration_forms_are_visible_without_using_defaults() {
         );
         let candidates = fs::read_to_string(root.join("candidates")).unwrap();
         assert_eq!(
-            candidates, "\n",
+            candidates, "",
             "invalid config produced candidates: {candidates:?}"
         );
         let args = fs::read_to_string(root.join("fzf-args")).unwrap();
@@ -314,7 +314,7 @@ case "$1 $2" in
     );
     executable(
         &bin.join("fzf"),
-        "#!/bin/sh\ncat > \"$FIXTURE/candidates\"\nprintf '%s\\n' '/tmp/project\\tproject\\tworkspace|existing'\n",
+        "#!/bin/sh\n: > \"$FIXTURE/candidates\"\nprintf '%s\\n' '/tmp/project\\tproject\\tworkspace|existing'\n",
     );
 
     let output = run_pick(&home, &bin, root);
@@ -323,7 +323,7 @@ case "$1 $2" in
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "\n");
+    assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "");
     assert!(
         !root.join("focused").exists(),
         "error view allowed navigation"

@@ -668,18 +668,18 @@ fn select_agent(
 }
 
 fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
-    let mut child = Command::new("fzf")
-        .args(["--disabled", "--no-multi", "--header", error])
-        .stdin(Stdio::piped())
+    let status = Command::new("fzf")
+        .args([
+            "--disabled",
+            "--no-multi",
+            "--header",
+            error,
+            "--bind=esc:abort,ctrl-c:abort",
+        ])
+        .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()?;
-    child
-        .stdin
-        .take()
-        .ok_or("failed to open fzf stdin")?
-        .write_all(b"Dismiss\n")?
-    let status = child.wait()?;
+        .status()?;
     if !status.success() && status.code() != Some(130) {
         return Err(format!("fzf exited with status {status}").into());
     }

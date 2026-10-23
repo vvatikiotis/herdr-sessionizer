@@ -1,3 +1,4 @@
 /target/
 /herdr-sessionizer
 /legacy/
+/tests/__pycache__/
