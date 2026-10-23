@@ -1157,3 +1157,66 @@ exit 0
         }
     }
 }
+
+#[test]
+fn picker_shows_fallback_agent_label_and_omitted_workspace_warning() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true},{"workspace_id":"wMissing","label":"missing","focused":false}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("panes.json"),
+        r#"{"result":{"panes":[{"workspace_id":"wMissing","cwd":null,"foreground_cwd":null}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("agents.json"),
+        r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"t1","pane_id":"p1"}]}}"#,
+    )
+    .unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') cat "$FIXTURE/panes.json" ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\ncat > \"$FIXTURE/candidates\"\nexit 0\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    let arguments = fs::read_to_string(root.join("fzf-args")).unwrap();
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(candidates.contains("Agent (p1)"));
+    assert!(arguments.contains("Hidden workspaces (directory unavailable): missing"));
+}

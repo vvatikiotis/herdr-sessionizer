@@ -185,6 +185,16 @@ fn invalid_configuration_forms_are_visible_without_using_defaults() {
             "roots = [{ path = \"~/root\", depth = 1, extra = true }]\n",
             "unknown field",
         ),
+        ("include = \"~/root\"\n", "invalid type"),
+        ("exclude = {}\n", "invalid type"),
+        ("roots = \"~/root\"\n", "invalid type"),
+        ("[[roots]]\npath = 1\ndepth = 1\n", "invalid type"),
+        (
+            "[[roots]]\npath = \"~/root\"\ndepth = \"1\"\n",
+            "invalid type",
+        ),
+        ("[[roots]]\ndepth = 1\n", "missing field `path`"),
+        ("[[roots]]\npath = \"~/root\"\n", "missing field `depth`"),
         (
             "[[roots]]\npath = \"~/root\"\ndepth = 0\n",
             "positive integer",
@@ -258,6 +268,33 @@ fn configured_symlinks_validate_targets_but_explicit_inclusions_remain_unchecked
     assert!(candidates.contains(&format!("{}\t", home.join("target").display())));
     assert!(!candidates.contains(&format!("{}\t", home.join("file-link").display())));
     assert!(candidates.contains(&format!("{}\t", home.join("broken-link").display())));
+}
+
+#[test]
+fn non_not_found_symlink_target_errors_stop_discovery() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    symlink("loop", home.join("root/loop")).unwrap();
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "[[roots]]\npath = \"~/root\"\ndepth = 2\n",
+    )
+    .unwrap();
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\nexit 0\n",
+    );
+
+    let output = run_pick(&home, &bin, root);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let args = fs::read_to_string(root.join("fzf-args")).unwrap();
+    assert!(args.contains("Directory discovery failed"));
+    assert!(args.contains("Too many levels of symbolic links"));
 }
 
 #[test]

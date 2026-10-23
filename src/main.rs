@@ -722,7 +722,7 @@ if [[ -z "$query" ]]; then
 fi
 matches_file=$(mktemp "${TMPDIR:-/tmp}/herdr-sessionizer-matches.XXXXXX") || exit 1
 trap 'rm -f -- "$matches_file"' EXIT
-fzf --delimiter=$'\t' --nth=4 --filter="$query" < "$open" > "$matches_file"
+fzf --no-sort --delimiter=$'\t' --nth=4 --filter="$query" < "$open" > "$matches_file"
 fzf_status=$?
 if ((fzf_status != 0 && fzf_status != 1)); then
     exit "$fzf_status"
@@ -756,7 +756,7 @@ awk -F'\t' '
         r#"{filter} {{q}} {open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
     );
     let selection = format!(
-        r#"if [[ -n {{q}} ]]; then match=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); filtered=$({filter} {{q}} {open}); if [[ -n "$match" ]]; then identity=$(printf '%s\n' "$match" | awk -F'\t' '{{print $3}}'); position=$(printf '%s\n' "$filtered" | awk -F'\t' -v identity="$identity" '$3 == identity {{print NR; exit}}'); fi; if [[ -n "$position" ]]; then printf 'pos(%s)\n' "$position"; else count=$(printf '%s\n' "$filtered" | awk 'NF {{count++}} END {{print count + 2}}'); printf 'pos(%s)\n' "$count"; fi; fi"#
+        r#"if [[ -n {{q}} ]]; then match=$(fzf --no-sort --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); filtered=$({filter} {{q}} {open}); if [[ -n "$match" ]]; then identity=$(printf '%s\n' "$match" | awk -F'\t' '{{print $3}}'); position=$(printf '%s\n' "$filtered" | awk -F'\t' -v identity="$identity" '$3 == identity {{print NR; exit}}'); fi; if [[ -n "$position" ]]; then printf 'pos(%s)\n' "$position"; else count=$(printf '%s\n' "$filtered" | awk 'NF {{count++}} END {{print count + 2}}'); printf 'pos(%s)\n' "$count"; fi; fi"#
     );
     let mut input = fs::read_to_string(open_file)?;
     input.push('\n');

@@ -186,8 +186,10 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             beta_two_workspace = cli("workspace", "create", "--cwd", str(beta_two), "--label", "beta-two", "--no-focus")["result"]
             beta_tab = cli("tab", "create", "--workspace", beta_workspace["workspace"]["workspace_id"], "--cwd", str(beta), "--focus")["result"]
             alpha_tab = cli("tab", "create", "--workspace", alpha_workspace["workspace"]["workspace_id"], "--cwd", str(alpha), "--no-focus")["result"]
+            alpha_agent_tab = cli("tab", "create", "--workspace", alpha_workspace["workspace"]["workspace_id"], "--cwd", str(alpha), "--no-focus")["result"]
             agent_pane = beta_tab["root_pane"]["pane_id"]
             alpha_pane = alpha_tab["root_pane"]["pane_id"]
+            beta_agent_pane = alpha_agent_tab["root_pane"]["pane_id"]
             # These are real Herdr-recognized agents in the disposable server.
             cli("agent", "start", "alphaagentunique", "--kind", "pi", "--pane", alpha_pane, "--timeout", "60000", "--", "--no-session")
             cli("agent", "start", "zzagentunique", "--kind", "pi", "--pane", agent_pane, "--timeout", "60000", "--", "--no-session")
@@ -290,6 +292,19 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 if picker.poll() is None:
                     picker.kill()
                     picker.wait()
+
+            # The earlier alpha agent and later beta workspace both match. Real
+            # fzf must accept the first matching row in display order.
+            cli("agent", "start", "betaagentunique", "--kind", "pi", "--pane", beta_agent_pane, "--timeout", "60000", "--", "--no-session")
+            (root / "state/herdr-sessionizer/workspace-history").write_text(
+                f"{alpha_workspace['workspace']['workspace_id']}\n{beta_workspace['workspace']['workspace_id']}\n"
+            )
+            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
+            if code != 0 or str(alpha).encode() not in screen:
+                raise AssertionError(f"cross-group search did not choose the earlier agent: {screen[-3000:]!r}")
+            focused = snapshot()
+            if not any(item.get("workspace_id") == alpha_workspace["workspace"]["workspace_id"] and item.get("focused") for item in focused["workspaces"]):
+                raise AssertionError("cross-group search focused the later workspace instead of the earlier agent")
 
             print("PASS: real fzf offset selection, directory fallback, search/ANSI, cross-workspace focus, and retryable stale-target error")
         finally:
