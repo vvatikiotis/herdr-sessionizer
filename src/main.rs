@@ -525,10 +525,10 @@ fn run_fzf(
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
     let filter_open = format!(
-        r#"if [[ -z {{q}} ]]; then cat {open}; else matches=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open}); awk -F'\t' -v matches="$matches" 'BEGIN {{ n=split(matches, lines, "\n"); for (i = 1; i <= n; i++) {{ split(lines[i], fields, "\t"); if (fields[3] != "") matched[fields[3]] = 1; }} }} {{ if (index($3, "workspace|") == 1) {{ print; next; }} split($3, parts, "|"); if (matched[$3] || matched["workspace|" parts[2]]) print; }}' {open}; fi"#
+        r#"if [[ -z {{q}} ]]; then cat {open}; else matches=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open}); matches_file=$(mktemp "${{TMPDIR:-/tmp}}/herdr-sessionizer-matches.XXXXXX") || exit 1; printf '%s\n' "$matches" > "$matches_file"; awk -F'\t' -v matches_file="$matches_file" 'BEGIN {{ while ((getline line < matches_file) > 0) {{ split(line, fields, "\t"); if (fields[3] != "") matched[fields[3]] = 1; }} close(matches_file) }} {{ if (index($3, "workspace|") == 1) {{ print; next; }} split($3, parts, "|"); if (matched[$3] || matched["workspace|" parts[2]]) print; }}' {open}; awk_status=$?; rm -f -- "$matches_file"; if ((awk_status != 0)); then exit "$awk_status"; fi; fi"#
     );
     let reload = format!(
-        r#"{filter_open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories}"#
+        r#"{filter_open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
     );
     let first_directory = open_rows.len() + 2;
     let selection = format!(

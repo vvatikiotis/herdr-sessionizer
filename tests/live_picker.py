@@ -44,7 +44,7 @@ def wait_for(predicate, description: str, timeout: float = 10.0):
         time.sleep(0.05)
 
 
-with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as temporary:
+with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as temporary:
     root = Path(temporary)
     session = "sessionizer-picker-test"
     config = root / "config/herdr/config.toml"
@@ -53,8 +53,10 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
     home = root / "home"
     alpha = home / "VAULT/alpha"
     beta = home / "VAULT/beta"
+    beta_two = home / "VAULT/beta-two"
     alpha.mkdir(parents=True)
     beta.mkdir(parents=True)
+    beta_two.mkdir(parents=True)
     (home / "devel").mkdir()
     plugin = root / "plugins/sessionizer"
     plugin.mkdir(parents=True)
@@ -144,6 +146,7 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                     os.write(master, chunk)
                 except OSError as error:
                     raise RuntimeError(f"picker input failed: {error}; output={bytes(output)[-3000:]!r}") from error
+            time.sleep(0.5)
             read_pty(master, process, output, deadline)
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
@@ -161,10 +164,14 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
             wait_for(socket.exists, "isolated Herdr socket")
             alpha_workspace = cli("workspace", "create", "--cwd", str(alpha), "--label", "alpha", "--focus")["result"]
             beta_workspace = cli("workspace", "create", "--cwd", str(beta), "--label", "beta", "--no-focus")["result"]
+            beta_two_workspace = cli("workspace", "create", "--cwd", str(beta_two), "--label", "beta-two", "--no-focus")["result"]
             beta_tab = cli("tab", "create", "--workspace", beta_workspace["workspace"]["workspace_id"], "--cwd", str(beta), "--focus")["result"]
+            alpha_tab = cli("tab", "create", "--workspace", alpha_workspace["workspace"]["workspace_id"], "--cwd", str(alpha), "--no-focus")["result"]
             agent_pane = beta_tab["root_pane"]["pane_id"]
-            # This is a real Herdr-recognized agent in the disposable server.
-            cli("agent", "start", "pickeragent", "--kind", "pi", "--pane", agent_pane, "--timeout", "60000", "--", "--no-session")
+            alpha_pane = alpha_tab["root_pane"]["pane_id"]
+            # These are real Herdr-recognized agents in the disposable server.
+            cli("agent", "start", "zzagentunique", "--kind", "pi", "--pane", agent_pane, "--timeout", "60000", "--", "--no-session")
+            cli("agent", "start", "alphaagentunique", "--kind", "pi", "--pane", alpha_pane, "--timeout", "60000", "--", "--no-session")
             cli("plugin", "link", str(plugin), "--enabled")
 
             agents = snapshot()["agents"]
@@ -180,6 +187,15 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                 raise AssertionError(f"agent has no searchable display/type metadata: {agent}")
             status = agent.get("agent_status") or "unknown"
 
+            # This query matches two open workspaces, but no unopened directory.
+            # The reload must emit both rows despite macOS awk's multiline -v bug.
+            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
+            if code != 0 or b"~/VAULT/beta" not in screen or b"~/VAULT/beta-two" not in screen:
+                raise AssertionError(f"workspace reload did not retain both beta rows: {screen[-3000:]!r}")
+
+            # This agent query matches the open beta workspace and agent, but
+            # no unopened directory. A failed directory reload must not discard
+            # those already-emitted workspace rows.
             code, screen = run_picker(str(search_term).encode() + b"\x1b[B\r", wait_for_text=str(search_term).encode())
             if code != 0:
                 raise AssertionError(f"agent selection failed (status {code}): {screen[-2000:]!r}")
