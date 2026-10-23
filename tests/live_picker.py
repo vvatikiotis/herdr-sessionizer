@@ -263,7 +263,11 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                             break
                 if str(search_term).encode() not in error_output:
                     raise AssertionError(f"filtered agent result did not settle: {bytes(error_output)[-2000:]!r}")
-                os.write(master, b"\x1b[B\r")
+                # result-final positions the matching agent automatically.
+                # Keep draining while the asynchronous reload settles; moving
+                # Down here would select the following workspace instead.
+                read_pty(master, picker, error_output, time.monotonic() + 1)
+                os.write(master, b"\r")
                 deadline = time.monotonic() + 10
                 read_pty(
                     master,

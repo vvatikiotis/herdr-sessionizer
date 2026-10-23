@@ -83,8 +83,9 @@ def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key
     screen = bytearray()
     try:
         deadline = time.monotonic() + 10
-        while b"Directory discovery failed" not in screen and b"Configuration" not in screen:
-            read_screen(master, process, screen, deadline)
+        while (b"Directory discovery failed" not in screen and b"Configuration" not in screen
+               and time.monotonic() < deadline):
+            read_screen(master, process, screen, min(deadline, time.monotonic() + 0.1))
             if process.poll() is not None:
                 break
         assert b"Directory discovery failed" in screen or b"Configuration" in screen, bytes(screen)
@@ -93,10 +94,10 @@ def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key
         assert child_pids(process), "fzf child was not alive before dismissal"
         time.sleep(0.5)
         os.write(master, key)
-        try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired as error:
-            raise AssertionError(f"dismissal timed out: {bytes(screen)!r}") from error
+        deadline = time.monotonic() + 5
+        while process.poll() is None and time.monotonic() < deadline:
+            read_screen(master, process, screen, min(deadline, time.monotonic() + 0.1))
+        assert process.poll() is not None, "dismissal timed out after draining terminal output"
         stdout, stderr = process.communicate(timeout=1)
         assert process.returncode != 0
         assert stdout == b"", stdout
@@ -129,7 +130,8 @@ def run_launch_failure(root: Path, deployment: Path, env: dict[str, str]) -> Non
         assert process.returncode != 0
         assert stdout == b"", stdout
         assert b"Directory discovery failed" in stderr, stderr
-        assert b"failed to open error view" in stderr, stderr
+        assert b"error view exited with status" in stderr, stderr
+        assert b"fzf-launch-failed" in stderr, stderr
         assert_cleanup(root)
     finally:
         if process.poll() is None:
@@ -184,6 +186,7 @@ with tempfile.TemporaryDirectory(prefix="sessionizer-config-error ", dir="/tmp")
     ]
     (home / "loop").symlink_to("loop")
     for config, key in cases:
+        print(f"Checking error dismissal with {key!r}: {config.splitlines()[0]}", flush=True)
         (root / "closed-pane").unlink(missing_ok=True)
         run_view(root, deployment, env, config, key)
 

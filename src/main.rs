@@ -675,13 +675,11 @@ fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
             "--no-multi",
             "--header",
             error,
-            "--bind=esc:abort,ctrl-c:abort,enter:abort,ctrl-m:abort",
+            "--bind=esc:abort,ctrl-c:abort,enter:abort,ctrl-m:abort,ctrl-j:abort",
         ])
-        // fzf reads keyboard input from the controlling terminal. The empty
-        // default command keeps the error view free of candidate rows.
-        .stdin(Stdio::inherit())
+        // Candidate input is empty; keyboard input comes from /dev/tty.
+        .stdin(Stdio::null())
         .stdout(terminal.map(Stdio::from).unwrap_or_else(Stdio::null))
-        .env("FZF_DEFAULT_COMMAND", "printf ''")
         .stderr(Stdio::inherit())
         .spawn()
         .map_err(|view_error| format!("{error}; failed to open error view: {view_error}"))?;
