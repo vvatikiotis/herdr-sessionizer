@@ -23,6 +23,65 @@ fn run(binary: &str, command: &str, root: &Path, bin: &Path) -> Output {
 }
 
 #[test]
+fn lifecycle_modes_do_not_start_server_but_picker_checks_server_readiness() {
+    for mode in ["track", "jump-back", "after-pane-exit", "pick"] {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let state = root.join("state/herdr-sessionizer");
+        let bin = root.join("bin");
+        fs::create_dir_all(&state).unwrap();
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(state.join("workspace-history"), "wA\nwB\n").unwrap();
+        fs::write(root.join("calls"), "").unwrap();
+        fs::create_dir_all(root.join("home/VAULT")).unwrap();
+        fs::create_dir_all(root.join("home/devel")).unwrap();
+        executable(
+            &bin.join("herdr"),
+            r###"#!/bin/sh
+printf '%s %s\n' "$1" "$2" >> "$FIXTURE/calls"
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wA","focused":true},{"workspace_id":"wB","focused":false}]}}' ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'workspace focus') exit 0 ;;
+  *) exit 1 ;;
+esac
+"###,
+        );
+        executable(&bin.join("fzf"), "#!/bin/sh\ncat > /dev/null\n");
+        let mut command = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"));
+        command
+            .arg(mode)
+            .env("HOME", root.join("home"))
+            .env("FIXTURE", root)
+            .env("XDG_STATE_HOME", root.join("state"))
+            .env("PATH", format!("{}:/usr/bin:/bin", bin.display()));
+        if mode == "after-pane-exit" {
+            command.env(
+                "HERDR_PLUGIN_EVENT_JSON",
+                r#"{"event":"pane_exited","data":{"pane_id":"p1","workspace_id":"wA"}}"#,
+            );
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{mode}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let calls = fs::read_to_string(root.join("calls")).unwrap();
+        if mode == "pick" {
+            assert!(calls.lines().any(|call| call == "status server"));
+        } else {
+            assert!(
+                !calls.lines().any(|call| call == "status server"),
+                "{mode}: {calls}"
+            );
+        }
+    }
+}
+
+#[test]
 fn track_excludes_pool_from_focused_saved_and_legacy_history() {
     for mode in ["saved", "legacy", "only-pool"] {
         let temp = TempDir::new().unwrap();
@@ -1062,6 +1121,130 @@ sed -n '2p' "$FIXTURE/candidates"
                 .is_some_and(|display| display.contains(pane_id))
         }));
     }
+}
+
+#[test]
+fn agent_selection_refreshes_history_before_printing_parent_directory() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(root.join("workspace-list-count"), "0").unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"t1","pane_id":"p1","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list')
+    count=$(cat "$FIXTURE/workspace-list-count")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FIXTURE/workspace-list-count"
+    if [ "$count" -lt 3 ]; then
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}'
+    else
+      printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wB","label":"other","focused":true}]}}'
+    fi
+    ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  'tab focus'|'agent focus') exit 0 ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > \"$FIXTURE/candidates\"\nsed -n '2p' \"$FIXTURE/candidates\"\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", home.join("VAULT/project").display())
+    );
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "wB\n"
+    );
+}
+
+#[test]
+fn agent_selection_does_not_print_directory_when_history_refresh_fails() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(root.join("workspace-list-count"), "0").unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"t1","pane_id":"p1","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list')
+    count=$(cat "$FIXTURE/workspace-list-count")
+    count=$((count + 1))
+    printf '%s\n' "$count" > "$FIXTURE/workspace-list-count"
+    [ "$count" -lt 3 ] || exit 1
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}'
+    ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  'tab focus'|'agent focus') exit 0 ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > \"$FIXTURE/candidates\"\ncount=$(cat \"$FIXTURE/fzf-count\" 2>/dev/null || printf 0)\ncount=$((count + 1))\nprintf '%s\\n' \"$count\" > \"$FIXTURE/fzf-count\"\nif [ \"$count\" -eq 1 ]; then sed -n '2p' \"$FIXTURE/candidates\"; fi\nexit 0\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "stdout={:?} stderr={:?}",
+        output.stdout,
+        output.stderr
+    );
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).is_empty());
+
+    // The focus calls happened, but the failed post-focus history refresh prevented success output.
+    assert_eq!(
+        fs::read_to_string(state.join("workspace-history")).unwrap(),
+        "wA\n"
+    );
 }
 
 #[test]
