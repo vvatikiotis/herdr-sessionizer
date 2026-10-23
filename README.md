@@ -41,12 +41,15 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
-Run the optional real-Herdr shell-exit regression after building:
+Run the isolated real-Herdr regressions after building:
 
 ```sh
 python3 tests/live_workspace_exit.py
+python3 tests/live_picker.py
 ```
 
-It starts and stops only its own temporary server with isolated home, configuration, state, and plugin registry. It verifies Ctrl+d focus recovery without requiring a shell-pool installation and passed on Herdr 0.9.5/macOS. A separate isolated check also passed after a warm-shell workspace move. Neither check establishes the full interactive fzf/picker flow or Linux behavior; those remain unverified.
+Both scripts start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, cross-workspace/tab/pane focus, shell-sensitive temporary paths, and a visible retry after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
+
+The interactive checks passed on Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. It proves fzf error visibility and recovery, while the Rust stub tests cover stale/missing IDs and dismissal. Linux and other Herdr/fzf versions remain unverified.
 
 The original Bash scripts and Python tests are retained under `legacy/` for reference. The plugin and current test suite do not use them.
