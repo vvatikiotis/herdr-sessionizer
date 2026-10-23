@@ -119,6 +119,172 @@ fn configuration_is_reread_and_lookup_does_not_depend_on_caller_directory() {
 }
 
 #[test]
+fn defaults_and_empty_or_omitted_configuration_replace_choices_predictably() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+
+    // The executable-boundary fallback is covered by the existing discovery
+    // regression; this test focuses on present files replacing it completely.
+    fs::write(bin.join("directories.toml"), "\n").unwrap();
+    let empty_output = run_pick(&home, &bin, root);
+    assert!(empty_output.status.success());
+    assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "\n");
+
+    fs::write(bin.join("directories.toml"), "include = [\"~/explicit\"]\n").unwrap();
+    let omitted_output = run_pick(&home, &bin, root);
+    assert!(omitted_output.status.success());
+    let omitted = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(omitted.contains(&format!("{}\t", home.join("explicit").display())));
+    assert!(!omitted.contains("default-project"));
+}
+
+#[test]
+fn normalized_paths_preserve_order_deduplicate_and_exclude_roots_before_access() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        r#"include = ["~/explicit/", "~/explicit", "/tmp/does-not-matter"]
+exclude = ["~/missing-root"]
+[[roots]]
+path = "~/missing-root/"
+depth = 3
+"#,
+    )
+    .unwrap();
+
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert_eq!(
+        candidates
+            .lines()
+            .filter(|line| line.starts_with(&format!("{}\t", home.join("explicit").display())))
+            .count(),
+        1
+    );
+    assert!(candidates.contains("/tmp/does-not-matter"));
+    assert!(!candidates.contains("Directory discovery failed"));
+}
+
+#[test]
+fn invalid_configuration_forms_are_visible_without_using_defaults() {
+    let cases = [
+        ("unknown = true\n", "unknown field"),
+        (
+            "roots = [{ path = \"~/root\", depth = 1, extra = true }]\n",
+            "unknown field",
+        ),
+        (
+            "[[roots]]\npath = \"~/root\"\ndepth = 0\n",
+            "positive integer",
+        ),
+        (
+            "[[roots]]\npath = \"relative\"\ndepth = 1\n",
+            "absolute or home-relative",
+        ),
+        (
+            "[[roots]]\npath = \"~/root/../other\"\ndepth = 1\n",
+            "may not contain ..",
+        ),
+        (
+            "[[roots]]\npath = \"~/root\"\ndepth = 1\n[[roots]]\npath = \"~/root/.\"\ndepth = 2\n",
+            "duplicate directory root",
+        ),
+    ];
+    for (config, expected) in cases {
+        let temp = TempDir::new().unwrap();
+        let root = temp.path();
+        let (home, bin) = deployment(&temp);
+        fs::create_dir_all(root.join("caller")).unwrap();
+        fs::write(bin.join("directories.toml"), config).unwrap();
+        executable(
+            &bin.join("fzf"),
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\ncat > \"$FIXTURE/candidates\"\nexit 0\n",
+        );
+        let output = run_pick(&home, &bin, root);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+        assert_eq!(
+            candidates, "\n",
+            "invalid config produced candidates: {candidates:?}"
+        );
+        let args = fs::read_to_string(root.join("fzf-args")).unwrap();
+        assert!(args.contains("Directory discovery failed"));
+        assert!(args.contains(expected), "{expected:?} not in {args:?}");
+    }
+}
+
+#[test]
+fn configured_symlinks_validate_targets_but_explicit_inclusions_remain_unchecked() {
+    use std::os::unix::fs::symlink;
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    let target = home.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(home.join("file"), "file").unwrap();
+    symlink(&target, home.join("root-link")).unwrap();
+    symlink(home.join("file"), home.join("file-link")).unwrap();
+    symlink(home.join("missing"), home.join("broken-link")).unwrap();
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "include = [\"~/broken-link\"]\n[[roots]]\npath = \"~/\"\ndepth = 1\n",
+    )
+    .unwrap();
+
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(candidates.contains(&format!("{}\t", home.join("root-link").display())));
+    assert!(candidates.contains(&format!("{}\t", home.join("target").display())));
+    assert!(!candidates.contains(&format!("{}\t", home.join("file-link").display())));
+    assert!(candidates.contains(&format!("{}\t", home.join("broken-link").display())));
+}
+
+#[test]
+fn candidate_paths_with_spaces_and_shell_punctuation_remain_data() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    let project = home.join("it's project");
+    fs::create_dir_all(&project).unwrap();
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(
+        bin.join("directories.toml"),
+        "include = [\"~/it's project\"]\n",
+    )
+    .unwrap();
+
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(candidates.contains(&format!("{}\t", project.display())));
+}
+
+#[test]
 fn malformed_configuration_fails_strictly_but_unrelated_tracking_still_works() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

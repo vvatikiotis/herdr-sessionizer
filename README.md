@@ -26,6 +26,29 @@ For unopened directories, sessionizer optionally calls `herdr-shell-pool/herdr-s
 
 Shell pool is optional: sessionizer requires no pool installation for its picker, ordinary workspace creation, history, or jump-back. Pool-workspace exclusion depends only on the reserved workspace label, not on finding or invoking the pool tool. An executable-level test verifies these behaviors from a standalone deployment with no sibling shell-pool directory.
 
+## Directory configuration
+
+The picker reads `directories.toml` beside the running `herdr-sessionizer` executable every time it opens. It does not use the caller's working directory. The shipped file is the editable starting configuration:
+
+```toml
+include = ["~/dotfiles", "~/Notes", "~/Downloads", "~/Work", "~/devel", "~/Mail"]
+exclude = ["~/devel/Archive", "~/devel/.sync", "~/devel/.SynologyWorkingDirectory"]
+
+[[roots]]
+path = "~/VAULT"
+depth = 3
+
+[[roots]]
+path = "~/devel"
+depth = 3
+```
+
+`roots` entries require an absolute or `~/` path and a positive `depth`. Depth one means immediate children of the root, not the root itself. Discovery processes roots in file order, then `include` entries in list order. Paths are normalized without resolving symlinks, and duplicate normalized roots are rejected. A present file replaces the built-in choices completely: omitted lists and an empty file mean no discovered or explicitly included paths. Built-in choices are used only when the file is absent.
+
+`exclude` entries are exact normalized paths. An excluded root is skipped before it is accessed, and an excluded discovered directory prunes its subtree. Explicit `include` entries are processed independently and can re-add an excluded or unavailable path; they are not checked until selection. Discovered symlinks are offered only when they point to existing directories, and are never traversed. Broken links and links to files are omitted. Other discovery errors, including unreadable roots or symlink targets, are shown in the picker.
+
+Invalid configuration and discovery failures remain in the picker header until the picker is dismissed. They do not fall back to defaults, create a workspace, or affect `track`, `jump-back`, or pane-exit recovery. Relative paths, `..` components, unknown keys, invalid types, zero depths, and duplicate normalized roots are errors. Paths containing spaces and shell punctuation are passed as arguments rather than evaluated as shell code.
+
 If the pool executable is absent, ordinary Herdr creation is retained. If it runs but fails, sessionizer stops without retrying creation, since a workspace may already exist. Descriptive Herdr notifications and cold-shell recovery for pool failures are not implemented. Workspace creation itself needs no extra hook or key binding; close-focus recovery requires the `pane.exited` hook described below.
 
 When Ctrl+d exits the final shell in a workspace and Herdr falls back to the pool, the pane-exit hook returns focus to the most recent surviving user workspace. If history has no target, it uses the first remaining user workspace; if none remain, it creates nothing. Ordinary manual pool selection is not redirected. Recovery is asynchronous, so the pool may briefly appear before focus returns. The updated binary and `pane.exited` hook are installed and registered. Future manifest changes need relinking, but no server restart.
@@ -46,10 +69,11 @@ Run the isolated real-Herdr regressions after building:
 ```sh
 python3 tests/live_workspace_exit.py
 python3 tests/live_picker.py
+python3 tests/live_config_error.py
 ```
 
-Both scripts start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, focus moving to the expected workspace and agent pane across a created tab, paths containing spaces, and picker recovery after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
+The two Herdr regressions start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, focus moving to the expected workspace and agent pane across a created tab, paths containing spaces, and picker recovery after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
 
-The interactive checks passed on Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. In this isolated scenario, it checks that fzf displays the error and that selecting a workspace row recovers; the Rust stub tests cover stale/missing IDs and dismissal. Linux and other Herdr/fzf versions remain unverified.
+The interactive checks passed on Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. In this isolated scenario, it checks that fzf displays the error and that selecting a workspace row recovers; the Rust stub tests cover stale/missing IDs and dismissal. `live_config_error.py` uses real fzf with stub Herdr and an isolated executable deployment to verify configuration-error visibility. Its cleanup assertions run when the PTY supports dismissal; on the observed macOS setup, fzf rendered the header but did not accept PTY dismissal, so the script reports a skip rather than claiming cleanup evidence. Linux and other Herdr/fzf versions remain unverified.
 
 The original Bash scripts and Python tests are retained under `legacy/` for reference. The plugin and current test suite do not use them.
