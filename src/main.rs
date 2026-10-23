@@ -478,8 +478,19 @@ fn discover_under_config(
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
         let is_symlink = metadata.file_type().is_symlink();
-        let is_directory = metadata.is_dir();
+        let is_directory = if is_symlink {
+            match fs::metadata(&path) {
+                Ok(target) => target.is_dir(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            metadata.is_dir()
+        };
         let next_depth = depth + 1;
+        if is_symlink && !is_directory {
+            continue;
+        }
         if !(is_directory || is_symlink) || next_depth > *max_depth || excludes.contains(&path) {
             continue;
         }
