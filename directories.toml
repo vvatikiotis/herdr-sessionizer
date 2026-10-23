@@ -1,8 +1,19 @@
 # Candidate directories discovered by herdr-sessionizer.
 # Paths may be absolute or relative to the current user's home directory.
 
-include = ["~/dotfiles", "~/Notes", "~/Downloads", "~/Work", "~/devel", "~/Mail"]
-exclude = ["~/devel/Archive", "~/devel/.sync", "~/devel/.SynologyWorkingDirectory"]
+include = [
+  "~/dotfiles",
+  "~/Notes",
+  "~/Downloads",
+  "~/Work",
+  "~/devel",
+  "~/Mail",
+]
+exclude = [
+  "~/devel/Archive",
+  "~/devel/.sync",
+  "~/devel/.SynologyWorkingDirectory",
+]
 
 [[roots]]
 path = "~/VAULT"
@@ -10,4 +21,4 @@ depth = 3
 
 [[roots]]
 path = "~/devel"
-depth = 3
+depth = 4
