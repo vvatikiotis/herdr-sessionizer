@@ -42,7 +42,70 @@ fn pane_exit_does_not_override_user_focus_or_create_a_workspace() {
             "{mode}: {}",
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(
+            !root.join("actions").exists(),
+            "{mode} must not focus or create"
+        );
+        if mode == "only-pool" {
+            assert_eq!(
+                fs::read_to_string(state.join("workspace-history")).unwrap(),
+                "\n"
+            );
+        }
     }
+}
+
+#[test]
+fn pane_exit_focus_failure_propagates_without_retrying_another_survivor() {
+    let temp = tempfile::TempDir::new().unwrap();
+    let root = temp.path();
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "closing\nolder\noldest\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"closing","focused":true},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false},{"workspace_id":"older","focused":false},{"workspace_id":"oldest","focused":false}]}}"#,
+    )
+    .unwrap();
+    let herdr = bin.join("herdr");
+    fs::write(
+        &herdr,
+        r#"#!/bin/sh
+case "$1 $2" in
+  'pane list')
+    printf '%s\n' '{"result":{"panes":[]}}'
+    printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":true},{"workspace_id":"older","focused":false},{"workspace_id":"oldest","focused":false}]}}' > "$FIXTURE/workspaces.json"
+    ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'workspace focus') printf '%s\n' "$3" >> "$FIXTURE/actions"; exit 1 ;;
+  *) exit 1 ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("after-pane-exit")
+        .env("HOME", root)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .env(
+            "HERDR_PLUGIN_EVENT_JSON",
+            r#"{"event":"pane_exited","data":{"pane_id":"closing-pane","workspace_id":"closing"}}"#,
+        )
+        .output()
+        .unwrap();
+    assert!(
+        !output.status.success(),
+        "stdout={:?} stderr={:?} actions={:?}",
+        output.stdout,
+        output.stderr,
+        fs::read_to_string(root.join("actions")).ok()
+    );
+    assert_eq!(fs::read_to_string(root.join("actions")).unwrap(), "older\n");
 }
 
 #[test]
