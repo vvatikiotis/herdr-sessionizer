@@ -851,6 +851,130 @@ fn jump_back_alternates_between_the_two_most_recent_open_workspaces() {
 }
 
 #[test]
+fn picker_keeps_missing_agent_ids_visible_until_dismissed() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"","pane_id":"wA:p1","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  *) echo unexpected-action >> "$FIXTURE/actions"; exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        r###"#!/bin/sh
+count=$(cat "$FIXTURE/fzf-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/fzf-count"
+printf '%s\n' "$*" > "$FIXTURE/fzf-args-$count"
+cat > "$FIXTURE/candidates-$count"
+if [ "$count" -eq 1 ]; then sed -n '2p' "$FIXTURE/candidates-$count"; fi
+"###,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!root.join("actions").exists());
+    assert!(
+        fs::read_to_string(root.join("fzf-args-2"))
+            .unwrap()
+            .contains("agent has no tab identifier")
+    );
+}
+
+#[test]
+fn picker_retries_agent_after_pane_failure_without_rollback() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"wA:t1","pane_id":"wA:p1","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  'tab focus') printf 'tab %s\n' "$3" >> "$FIXTURE/actions" ;;
+  'agent focus') printf 'pane %s\n' "$3" >> "$FIXTURE/actions"; count=$(cat "$FIXTURE/pane-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/pane-count"; [ "$count" -gt 1 ] ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        r###"#!/bin/sh
+count=$(cat "$FIXTURE/fzf-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/fzf-count"
+cat > "$FIXTURE/candidates-$count"
+sed -n '2p' "$FIXTURE/candidates-$count"
+"###,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", home.join("VAULT/project").display()).as_bytes()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("actions")).unwrap(),
+        "tab wA:t1\npane wA:p1\ntab wA:t1\npane wA:p1\n"
+    );
+}
+
+#[test]
 fn picker_selects_nested_agent_by_captured_tab_and_pane_ids() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
