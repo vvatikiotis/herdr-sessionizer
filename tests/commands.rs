@@ -195,8 +195,11 @@ fn picker_discovers_only_supported_depths_and_prunes_development_archives() {
     fs::create_dir_all(home.join("devel/.sync/hidden")).unwrap();
     fs::create_dir_all(home.join("devel/.SynologyWorkingDirectory/hidden")).unwrap();
     fs::create_dir_all(home.join("devel/visible")).unwrap();
-    fs::create_dir_all(home.join("outside/target")).unwrap();
+    fs::create_dir_all(home.join("outside/target/nested")).unwrap();
+    fs::write(home.join("outside/file"), "not a directory").unwrap();
     symlink(home.join("outside/target"), home.join("devel/link")).unwrap();
+    symlink(home.join("outside/file"), home.join("devel/file-link")).unwrap();
+    symlink(home.join("outside/missing"), home.join("devel/broken-link")).unwrap();
     fs::create_dir_all(&state).unwrap();
     fs::create_dir_all(&bin).unwrap();
     fs::write(
@@ -254,6 +257,9 @@ exit 0
         &home.join("devel/.sync/hidden"),
         &home.join("devel/.SynologyWorkingDirectory/hidden"),
         &home.join("outside/target"),
+        &home.join("outside/target/nested"),
+        &home.join("devel/file-link"),
+        &home.join("devel/broken-link"),
     ] {
         assert!(!candidates.contains(&format!("{}\t", path.display())));
     }
