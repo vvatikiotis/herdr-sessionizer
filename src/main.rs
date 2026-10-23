@@ -34,6 +34,20 @@ fn pick() -> Result<(), Box<dyn Error>> {
     result
 }
 
+struct OpenWorkspace {
+    id: String,
+    path: String,
+    display: String,
+}
+
+struct AgentRow {
+    workspace_id: String,
+    tab_id: String,
+    pane_id: String,
+    label: String,
+    display: String,
+}
+
 fn pick_inner() -> Result<(), Box<dyn Error>> {
     ensure_server();
     track_workspace()?;
@@ -82,8 +96,8 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     );
 
     let mut seen_ids = std::collections::HashSet::new();
-    let mut open_paths = Vec::new();
-    let mut seen_paths = std::collections::HashSet::new();
+    let mut open_workspaces = Vec::new();
+    let mut omitted = Vec::new();
     for id in ordered_ids {
         if id == pool_id || !seen_ids.insert(id) {
             continue;
@@ -94,10 +108,15 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         else {
             continue;
         };
-        if let Some(path) = workspace_directory(workspace, &available, pane_list)
-            && seen_paths.insert(path.clone())
-        {
-            open_paths.push(path);
+        let label = workspace.get("label").and_then(Value::as_str).unwrap_or(id);
+        if let Some(path) = workspace_directory(workspace, &available, pane_list) {
+            open_workspaces.push(OpenWorkspace {
+                id: id.to_owned(),
+                display: abbreviate_home(&path, &home),
+                path,
+            });
+        } else {
+            omitted.push(label.to_owned());
         }
     }
 
@@ -116,35 +135,89 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         .map(|path| path.to_string_lossy().into_owned())
         .collect::<Vec<_>>();
 
-    let width = open_paths
+    let width = open_workspaces
         .iter()
-        .map(|path| path.chars().count())
+        .map(|workspace| workspace.display.chars().count())
         .max()
         .unwrap_or(0);
     let mut open_rows = Vec::new();
-    for path in &open_paths {
-        let mut display = abbreviate_home(path, &home);
-        let counts = agent_counts(path, workspace_list, agent_list, pool_id);
-        if !counts.is_empty() {
-            let padding = width.saturating_sub(display.chars().count());
-            display = format!("{}{} ({counts})", display, " ".repeat(padding));
-        }
-        open_rows.push(format!("{path}\t{display}"));
+    for workspace in &open_workspaces {
+        let padding = width.saturating_sub(workspace.display.chars().count());
+        open_rows.push(format!(
+            "{}\t{}{}\tworkspace|{}",
+            workspace.path,
+            workspace.display,
+            " ".repeat(padding),
+            workspace.id
+        ));
+        let mut rows = agent_rows(workspace, agent_list);
+        disambiguate_agent_labels(&mut rows);
+        open_rows.extend(rows.into_iter().map(|row| {
+            format!(
+                "{}\t  ↳ {}\tagent|{}|{}|{}",
+                workspace.path, row.display, row.workspace_id, row.tab_id, row.pane_id
+            )
+        }));
     }
     let directory_rows = unopened
         .iter()
-        .map(|path| format!("{path}\t{path}"))
+        .map(|path| format!("{path}\t{path}\tdirectory|{path}"))
         .collect::<Vec<_>>();
+    let warning = (!omitted.is_empty()).then(|| {
+        format!(
+            "Hidden workspaces (directory unavailable): {}",
+            omitted.join(", ")
+        )
+    });
     let temporary = TemporaryDirectory::new()?;
     let open_file = temporary.path.join("open-workspaces");
     let directory_file = temporary.path.join("directories");
     fs::write(&open_file, lines_with_newline(&open_rows))?;
     fs::write(&directory_file, lines_with_newline(&directory_rows))?;
-    let selection = run_fzf(&open_file, &directory_file, &open_rows)?;
+    let selection = run_fzf(&open_file, &directory_file, &open_rows, warning.as_deref())?;
     if selection.is_empty() {
         return Ok(());
     }
-    let selected_path = selection.split('\t').next().unwrap_or(&selection);
+    let row_fields = selection.split('\t').collect::<Vec<_>>();
+    let selected_path = row_fields.first().copied().unwrap_or(&selection);
+    let key = row_fields.get(2).copied().unwrap_or(selected_path);
+    let fields = key.split('|').collect::<Vec<_>>();
+    if fields.first() == Some(&"agent") {
+        let workspace_id = fields
+            .get(1)
+            .filter(|id| !id.is_empty())
+            .ok_or("agent has no workspace identifier")?;
+        let tab_id = fields
+            .get(2)
+            .filter(|id| !id.is_empty())
+            .ok_or("agent has no tab identifier")?;
+        let pane_id = fields
+            .get(3)
+            .filter(|id| !id.is_empty())
+            .ok_or("agent has no pane identifier")?;
+        let workspace = open_workspaces
+            .iter()
+            .find(|workspace| workspace.id == *workspace_id)
+            .ok_or("agent workspace is unavailable")?;
+        herdr_silent_stdout(&["tab", "focus", tab_id])?;
+        herdr_silent_stdout(&["agent", "focus", pane_id])?;
+        track_workspace()?;
+        let directory = resolve_directory(&workspace.path)?;
+        println!("{directory}");
+        return Ok(());
+    }
+    let selected_path = if fields.first() == Some(&"workspace") {
+        let id = fields.get(1).ok_or("workspace row has no identifier")?;
+        open_workspaces
+            .iter()
+            .find(|workspace| workspace.id == *id)
+            .map(|workspace| workspace.path.as_str())
+            .ok_or("workspace row is unavailable")?
+    } else if fields.first() == Some(&"directory") {
+        fields.get(1).copied().unwrap_or(selected_path)
+    } else {
+        selected_path
+    };
     let directory = resolve_directory(selected_path)?;
     let name = Path::new(&directory)
         .file_name()
@@ -320,48 +393,73 @@ fn abbreviate_home(path: &str, home: &Path) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-fn agent_counts(path: &str, workspaces: &[Value], agents: &[Value], pool_id: &str) -> String {
-    let name = path.rsplit('/').next();
-    let workspace_id = workspaces
+fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
+    agents
         .iter()
-        .find(|workspace| {
-            workspace.get("workspace_id").and_then(Value::as_str) != Some(pool_id)
-                && workspace.get("label").and_then(Value::as_str) == name
+        .filter(|agent| {
+            agent.get("workspace_id").and_then(Value::as_str) == Some(workspace.id.as_str())
         })
-        .and_then(|workspace| workspace.get("workspace_id"))
-        .and_then(Value::as_str);
-    let mut counts = std::collections::BTreeMap::<String, usize>::new();
-    for agent in agents
-        .iter()
-        .filter(|agent| agent.get("workspace_id").and_then(Value::as_str) == workspace_id)
-    {
-        let name = agent
-            .get("agent")
-            .map(|value| {
-                value
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| value.to_string())
-            })
-            .unwrap_or_else(|| "null".to_owned());
-        *counts.entry(name).or_default() += 1;
-    }
-    counts
-        .into_iter()
-        .map(|(agent, count)| {
-            let display_name = match agent.as_str() {
-                "pi" => "Pi",
-                "codex" => "Codex",
-                "hermes" => "Hermes",
-                "opencode" => "OpenCode",
-                "openclaw" => "OpenClaw",
-                "claude-code" => "Claude Code",
-                other => other,
+        .map(|agent| {
+            let display_name = agent
+                .get("display_name")
+                .and_then(Value::as_str)
+                .or_else(|| agent.get("name").and_then(Value::as_str));
+            let agent_type = agent
+                .get("agent")
+                .and_then(Value::as_str)
+                .or_else(|| agent.get("type").and_then(Value::as_str));
+            let mut label = match (display_name, agent_type) {
+                (Some(name), Some(kind)) if name != kind => format!("{name} ({kind})"),
+                (Some(name), _) | (None, Some(name)) => name.to_owned(),
+                (None, None) => "Agent".to_owned(),
             };
-            format!("{display_name}: {count}")
+            let pane_id = agent.get("pane_id").and_then(Value::as_str).unwrap_or("");
+            if label == "Agent" && !pane_id.is_empty() {
+                label = format!("Agent ({pane_id})");
+            }
+            let status = agent
+                .get("agent_status")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let color = match status {
+                "working" => "33",
+                "done" => "32",
+                "blocked" => "31",
+                "unknown" => "90",
+                _ => "90",
+            };
+            let status = if status == "idle" {
+                format!("[{status}]")
+            } else {
+                format!("\x1b[{color}m[{status}]\x1b[0m")
+            };
+            label.push(' ');
+            label.push_str(&status);
+            AgentRow {
+                workspace_id: workspace.id.clone(),
+                tab_id: agent
+                    .get("tab_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_owned(),
+                pane_id: pane_id.to_owned(),
+                label: label.clone(),
+                display: label,
+            }
         })
-        .collect::<Vec<_>>()
-        .join(", ")
+        .collect()
+}
+
+fn disambiguate_agent_labels(rows: &mut [AgentRow]) {
+    let mut counts = std::collections::HashMap::new();
+    for row in rows.iter() {
+        *counts.entry(row.label.clone()).or_insert(0usize) += 1;
+    }
+    for row in rows.iter_mut() {
+        if counts.get(&row.label).copied().unwrap_or(0) > 1 && !row.pane_id.is_empty() {
+            row.display = format!("{} ({})", row.display, row.pane_id);
+        }
+    }
 }
 
 fn lines_with_newline(lines: &[String]) -> String {
@@ -380,6 +478,7 @@ fn run_fzf(
     open_file: &Path,
     directory_file: &Path,
     open_rows: &[String],
+    warning: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
@@ -396,6 +495,7 @@ fn run_fzf(
     let mut child = Command::new("fzf")
         .args([
             "--cycle",
+            "--ansi",
             "--delimiter=\\t",
             "--with-nth=2",
             "--layout=reverse",
@@ -409,6 +509,11 @@ fn run_fzf(
             "--border=rounded",
             "--border-label= Select Herdr workspace directory ",
         ])
+        .args(
+            warning
+                .into_iter()
+                .flat_map(|warning| ["--header", warning]),
+        )
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;

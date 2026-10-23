@@ -389,7 +389,9 @@ exit 0
     assert!(output.stdout.is_empty());
     let candidates = fs::read_to_string(root.join("candidates")).unwrap();
     assert!(candidates.contains("~/VAULT/wA"));
-    assert!(candidates.contains("(Codex: 1, Pi: 2)"));
+    assert!(candidates.contains("pi"));
+    assert!(candidates.contains("codex"));
+    assert!(!candidates.contains("Codex: 1, Pi: 2"));
     assert_eq!(
         fs::read_to_string(root.join("closed-pane")).unwrap(),
         "picker-pane\n"
@@ -846,4 +848,72 @@ fn jump_back_alternates_between_the_two_most_recent_open_workspaces() {
         String::from_utf8_lossy(&second.stderr)
     );
     assert_eq!(fs::read_to_string(root.join("focused")).unwrap(), "wB\n");
+}
+
+#[test]
+fn picker_selects_nested_agent_by_captured_tab_and_pane_ids() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"wA:t1","pane_id":"wA:p1","display_name":"review","agent":"codex","agent_status":"working"},{"workspace_id":"wA","tab_id":"wA:t2","pane_id":"wA:p2","display_name":"review","agent":"codex","agent_status":"blocked"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') cat "$FIXTURE/agents.json" ;;
+  'tab focus'|'agent focus') printf '%s %s\n' "$1 $2" "$3" >> "$FIXTURE/actions" ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        r###"#!/bin/sh
+cat > "$FIXTURE/candidates"
+sed -n '2p' "$FIXTURE/candidates"
+"###,
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", home.join("VAULT/project").display())
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("actions")).unwrap(),
+        "tab focus wA:t1\nagent focus wA:p1\n"
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(candidates.contains("review (codex)"));
+    assert!(candidates.contains("[working]"));
+    assert!(candidates.contains("[blocked]"));
+    assert!(candidates.contains("wA:p1"));
+    assert!(candidates.contains("wA:p2"));
 }
