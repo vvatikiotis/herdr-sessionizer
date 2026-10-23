@@ -174,38 +174,39 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let directory_file = temporary.path.join("directories");
     fs::write(&open_file, lines_with_newline(&open_rows))?;
     fs::write(&directory_file, lines_with_newline(&directory_rows))?;
-    let selection = run_fzf(&open_file, &directory_file, &open_rows, warning.as_deref())?;
-    if selection.is_empty() {
-        return Ok(());
-    }
+    let mut error_header = None;
+    let selection = loop {
+        let selection = run_fzf(
+            &open_file,
+            &directory_file,
+            &open_rows,
+            picker_header(warning.as_deref(), error_header.as_deref()).as_deref(),
+        )?;
+        if selection.is_empty() {
+            return Ok(());
+        }
+        let row_fields = selection.split('\t').collect::<Vec<_>>();
+        let selected_path = row_fields.first().copied().unwrap_or(&selection);
+        let key = row_fields.get(2).copied().unwrap_or(selected_path);
+        let fields = key.split('|').collect::<Vec<_>>();
+        if fields.first() == Some(&"agent") {
+            match select_agent(&fields, &open_workspaces) {
+                Ok(directory) => {
+                    println!("{directory}");
+                    return Ok(());
+                }
+                Err(error) => {
+                    error_header = Some(format!("Agent selection failed: {error}"));
+                    continue;
+                }
+            }
+        }
+        break selection;
+    };
     let row_fields = selection.split('\t').collect::<Vec<_>>();
     let selected_path = row_fields.first().copied().unwrap_or(&selection);
     let key = row_fields.get(2).copied().unwrap_or(selected_path);
     let fields = key.split('|').collect::<Vec<_>>();
-    if fields.first() == Some(&"agent") {
-        let workspace_id = fields
-            .get(1)
-            .filter(|id| !id.is_empty())
-            .ok_or("agent has no workspace identifier")?;
-        let tab_id = fields
-            .get(2)
-            .filter(|id| !id.is_empty())
-            .ok_or("agent has no tab identifier")?;
-        let pane_id = fields
-            .get(3)
-            .filter(|id| !id.is_empty())
-            .ok_or("agent has no pane identifier")?;
-        let workspace = open_workspaces
-            .iter()
-            .find(|workspace| workspace.id == *workspace_id)
-            .ok_or("agent workspace is unavailable")?;
-        herdr_silent_stdout(&["tab", "focus", tab_id])?;
-        herdr_silent_stdout(&["agent", "focus", pane_id])?;
-        track_workspace()?;
-        let directory = resolve_directory(&workspace.path)?;
-        println!("{directory}");
-        return Ok(());
-    }
     let selected_path = if fields.first() == Some(&"workspace") {
         let id = fields.get(1).ok_or("workspace row has no identifier")?;
         open_workspaces
@@ -474,11 +475,45 @@ fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
 
+fn picker_header(warning: Option<&str>, error: Option<&str>) -> Option<String> {
+    match (warning, error) {
+        (Some(warning), Some(error)) => Some(format!("{warning}\n{error}")),
+        (Some(header), None) | (None, Some(header)) => Some(header.to_owned()),
+        (None, None) => None,
+    }
+}
+
+fn select_agent(
+    fields: &[&str],
+    open_workspaces: &[OpenWorkspace],
+) -> Result<String, Box<dyn Error>> {
+    let workspace_id = fields
+        .get(1)
+        .filter(|id| !id.is_empty())
+        .ok_or("agent has no workspace identifier")?;
+    let tab_id = fields
+        .get(2)
+        .filter(|id| !id.is_empty())
+        .ok_or("agent has no tab identifier")?;
+    let pane_id = fields
+        .get(3)
+        .filter(|id| !id.is_empty())
+        .ok_or("agent has no pane identifier")?;
+    let workspace = open_workspaces
+        .iter()
+        .find(|workspace| workspace.id == *workspace_id)
+        .ok_or("agent workspace is unavailable")?;
+    herdr_silent_stdout(&["tab", "focus", tab_id])?;
+    herdr_silent_stdout(&["agent", "focus", pane_id])?;
+    track_workspace()?;
+    resolve_directory(&workspace.path)
+}
+
 fn run_fzf(
     open_file: &Path,
     directory_file: &Path,
     open_rows: &[String],
-    warning: Option<&str>,
+    header: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
@@ -509,11 +544,7 @@ fn run_fzf(
             "--border=rounded",
             "--border-label= Select Herdr workspace directory ",
         ])
-        .args(
-            warning
-                .into_iter()
-                .flat_map(|warning| ["--header", warning]),
-        )
+        .args(header.into_iter().flat_map(|header| ["--header", header]))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()?;
