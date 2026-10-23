@@ -1554,7 +1554,7 @@ fn picker_retries_the_captured_agent_after_metadata_changes_without_retargeting(
         r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
     )
     .unwrap();
-    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"captured-tab","pane_id":"captured-pane","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"captured-tab","pane_id":"captured-pane","display_name":"review","agent":"codex","agent_status":"working"}]}}"#).unwrap();
     executable(
         &bin.join("herdr"),
         r###"#!/bin/sh
@@ -1562,12 +1562,18 @@ case "$1 $2" in
   'status server') exit 0 ;;
   workspace\ list) cat "$FIXTURE/workspaces.json" ;;
   pane\ list) printf '%s\n' '{"result":{"panes":[]}}' ;;
-  agent\ list) cat "$FIXTURE/agents.json" ;;
+  agent\ list)
+    count=$(cat "$FIXTURE/agent-list-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/agent-list-count"
+    cat "$FIXTURE/agents.json"
+    ;;
   tab\ focus) printf 'tab %s\n' "$3" >> "$FIXTURE/actions" ;;
   agent\ focus)
     printf 'pane %s\n' "$3" >> "$FIXTURE/actions"
     count=$(cat "$FIXTURE/pane-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/pane-count"
-    if [ "$count" -eq 1 ]; then printf '%s\n' '{"result":{"agents":[{"workspace_id":"wA","tab_id":"new-tab","pane_id":"new-pane"}]}}' > "$FIXTURE/agents.json"; exit 1; fi
+    if [ "$count" -eq 1 ]; then
+      printf '%s\n' '{"result":{"agents":[{"workspace_id":"wA","tab_id":"new-tab","pane_id":"new-pane","display_name":"changed","agent":"other","agent_status":"blocked"}]}}' > "$FIXTURE/agents.json"
+      exit 1
+    fi
     ;;
   *) exit 1 ;;
 esac
@@ -1602,4 +1608,27 @@ sed -n '2p' "$FIXTURE/candidates-$count"
         fs::read_to_string(root.join("actions")).unwrap(),
         "tab captured-tab\npane captured-pane\ntab captured-tab\npane captured-pane\n"
     );
+    assert_eq!(
+        fs::read_to_string(root.join("agent-list-count")).unwrap(),
+        "1\n"
+    );
+    let expected_row = format!(
+        "{}\t  ↳ review (codex) \u{1b}[33m[working]\u{1b}[0m\tagent|wA|captured-tab|captured-pane\treview codex",
+        home.join("VAULT/project").display()
+    );
+    for candidate_file in ["candidates-1", "candidates-2"] {
+        let rows = fs::read_to_string(root.join(candidate_file)).unwrap();
+        assert!(
+            rows.lines().any(|row| row == expected_row),
+            "{candidate_file}: {rows:?}"
+        );
+        assert!(
+            !rows.contains("changed"),
+            "{candidate_file} refetched metadata: {rows:?}"
+        );
+        assert!(
+            !rows.contains("new-pane"),
+            "{candidate_file} retargeted metadata: {rows:?}"
+        );
+    }
 }

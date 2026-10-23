@@ -194,6 +194,21 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         except json.JSONDecodeError:
             return None
 
+    def send_fzf_action(action: bytes) -> None:
+        request = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
+        try:
+            request.settimeout(1)
+            request.connect(("127.0.0.1", active_fzf_port[0]))
+            request.sendall(
+                b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: "
+                + str(len(action)).encode()
+                + b"\r\nConnection: close\r\n\r\n"
+                + action
+            )
+            request.recv(4096)
+        finally:
+            request.close()
+
     def wait_for_fzf_state(predicate, description: str, timeout: float = 15.0):
         state = None
         deadline = time.monotonic() + timeout
@@ -211,6 +226,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         wait_after_first: bytes = b"",
         settled_query: bytes | None = None,
         settled_state: list | None = None,
+        settled_action: bytes | None = None,
+        settled_position: int | None = None,
         timeout: float = 15.0,
     ):
         listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
@@ -280,6 +297,15 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                         )
                         if settled_state is not None:
                             settled_state.append(state)
+                        if settled_position is not None:
+                            wait_for_fzf_state(
+                                lambda state: state.get("query") == settled_query.decode()
+                                and not state.get("reading", False)
+                                and state.get("position") == settled_position,
+                                f"fzf query {settled_query!r} to position {settled_position}",
+                            )
+                        if settled_action is not None:
+                            send_fzf_action(settled_action)
             read_pty(master, process, output, deadline)
             if process.poll() is None:
                 raise RuntimeError(f"picker did not exit after input: {bytes(output)[-3000:]!r}")
@@ -539,12 +565,37 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             (root / "state/herdr-sessionizer/workspace-history").write_text(
                 f"{alpha_workspace['workspace']['workspace_id']}\n{beta_workspace['workspace']['workspace_id']}\n"
             )
-            code, screen = run_picker(b"beta\r", wait_for_text=b"beta")
-            if code != 0 or str(alpha).encode() not in screen:
-                raise AssertionError(f"cross-group search did not choose the earlier agent: {screen[-3000:]!r}")
+            cross_agent = next(item for item in snapshot()["agents"] if item.get("pane_id") == beta_agent_pane)
+            cross_group_state = []
+            before_cross_group = navigation_calls()
+            code, screen = run_picker(
+                b"beta",
+                wait_for_text=b"beta",
+                wait_after_first=b"beta",
+                settled_query=b"beta",
+                settled_state=cross_group_state,
+                settled_action=b"accept",
+            )
+            after_cross_group = navigation_calls()
+            identity = f"agent|{alpha_workspace['workspace']['workspace_id']}|{cross_agent['tab_id']}|{cross_agent['pane_id']}"
+            identity_parts = identity.split("|")
+            expected = [f"tab focus {cross_agent['tab_id']}", f"agent focus {cross_agent['pane_id']}"]
+            if identity_parts[2] != cross_agent.get("tab_id") or identity_parts[3] != cross_agent.get("pane_id"):
+                raise AssertionError(f"cross-group row identity changed before action: {identity!r}, agent={cross_agent!r}")
+            if code != 0 or after_cross_group[len(before_cross_group):] != expected:
+                raise AssertionError(
+                    f"cross-group search accepted {identity!r} with actions "
+                    f"{after_cross_group[len(before_cross_group):]!r}, expected {expected!r}"
+                )
+            if str(alpha).encode() not in screen:
+                raise AssertionError(f"cross-group search did not print alpha directory: {screen[-3000:]!r}")
+            if identity_parts[1] != alpha_workspace["workspace"]["workspace_id"] or identity_parts[3] != beta_agent_pane:
+                raise AssertionError(f"cross-group search selected the wrong alpha agent identity: {identity!r}")
             focused = snapshot()
             if not any(item.get("workspace_id") == alpha_workspace["workspace"]["workspace_id"] and item.get("focused") for item in focused["workspaces"]):
                 raise AssertionError("cross-group search focused the later workspace instead of the earlier agent")
+            if not any(item.get("pane_id") == beta_agent_pane and item.get("focused") for item in focused["panes"]):
+                raise AssertionError("cross-group search did not focus the selected alpha agent pane")
 
             print("PASS: real fzf offset selection, directory fallback, search/ANSI, cross-workspace focus, and retryable stale-target error")
         finally:

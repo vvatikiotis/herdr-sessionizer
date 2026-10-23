@@ -65,8 +65,18 @@ def assert_cleanup(root: Path) -> None:
     assert not any(scratch.iterdir()), list(scratch.iterdir())
 
 
+def assert_no_navigation(root: Path, before: int) -> None:
+    calls = (root / "herdr-calls").read_text().splitlines()
+    navigation = [
+        line for line in calls[before:]
+        if line.startswith(("workspace focus", "workspace create", "tab focus", "agent focus"))
+    ]
+    assert not navigation, navigation
+
+
 def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key: bytes) -> None:
     (deployment / "directories.toml").write_text(config)
+    before_calls = len((root / "herdr-calls").read_text().splitlines()) if (root / "herdr-calls").exists() else 0
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     process = subprocess.Popen(
@@ -102,6 +112,7 @@ def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key
         assert process.returncode != 0
         assert stdout == b"", stdout
         assert b"Directory discovery failed" in stderr, stderr
+        assert_no_navigation(root, before_calls)
         assert_cleanup(root)
     finally:
         if process.poll() is None:
@@ -112,6 +123,7 @@ def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key
 
 def run_launch_failure(root: Path, deployment: Path, env: dict[str, str]) -> None:
     (deployment / "directories.toml").write_text("unknown = true\n")
+    before_calls = len((root / "herdr-calls").read_text().splitlines()) if (root / "herdr-calls").exists() else 0
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
     process = subprocess.Popen(
@@ -132,6 +144,7 @@ def run_launch_failure(root: Path, deployment: Path, env: dict[str, str]) -> Non
         assert b"Directory discovery failed" in stderr, stderr
         assert b"error view exited with status" in stderr, stderr
         assert b"fzf-launch-failed" in stderr, stderr
+        assert_no_navigation(root, before_calls)
         assert_cleanup(root)
     finally:
         if process.poll() is None:
@@ -154,6 +167,7 @@ with tempfile.TemporaryDirectory(prefix="sessionizer-config-error ", dir="/tmp")
     herdr = command_bin / "herdr"
     herdr.write_text(
         "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$FIXTURE/herdr-calls\"\n"
         "case \"$1 $2\" in\n"
         "  'workspace list') printf '%s\\n' '{\"result\":{\"workspaces\":[]}}' ;;\n"
         "  'pane list') printf '%s\\n' '{\"result\":{\"panes\":[]}}' ;;\n"
