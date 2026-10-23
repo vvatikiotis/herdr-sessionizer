@@ -17,6 +17,8 @@ fn deployment(temp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
     let bin = root.join("bin");
     fs::create_dir_all(&bin).unwrap();
     fs::create_dir_all(home.join("root/a/b/c")).unwrap();
+    fs::create_dir_all(home.join("VAULT")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
     fs::create_dir_all(home.join("other")).unwrap();
     fs::create_dir_all(home.join("explicit")).unwrap();
     fs::copy(
@@ -211,11 +213,9 @@ fn invalid_configuration_forms_are_visible_without_using_defaults() {
             "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\n: > \"$FIXTURE/candidates\"\nexit 0\n",
         );
         let output = run_pick(&home, &bin, root);
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
+        assert!(!output.status.success());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("Directory discovery failed"));
+        assert!(output.stdout.is_empty());
         let candidates = fs::read_to_string(root.join("candidates")).unwrap();
         assert_eq!(
             candidates, "",
@@ -318,11 +318,9 @@ case "$1 $2" in
     );
 
     let output = run_pick(&home, &bin, root);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Directory discovery failed"));
+    assert!(output.stdout.is_empty());
     assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "");
     assert!(
         !root.join("focused").exists(),
@@ -354,6 +352,23 @@ fn shipped_configuration_matches_missing_file_defaults() {
 }
 
 #[test]
+fn error_view_launch_failure_reports_original_and_display_errors() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    fs::write(bin.join("directories.toml"), "unknown = true\n").unwrap();
+    fs::remove_file(bin.join("fzf")).unwrap();
+
+    let output = run_pick(&home, &bin, root);
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    let error = String::from_utf8_lossy(&output.stderr);
+    assert!(error.contains("Directory discovery failed"));
+    assert!(error.contains("failed to open error view"));
+}
+
+#[test]
 fn malformed_configuration_fails_strictly_but_unrelated_tracking_still_works() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
@@ -369,11 +384,9 @@ exit 0
 "#,
     );
     let output = run_pick(&home, &bin, root);
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("Directory discovery failed"));
+    assert!(output.stdout.is_empty());
     let fzf_args = fs::read_to_string(root.join("fzf-args")).unwrap();
     assert!(fzf_args.contains("--header"));
     assert!(fzf_args.contains("Directory discovery failed"));
