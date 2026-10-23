@@ -61,8 +61,9 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let available = match discover_directories(&home) {
         Ok(available) => available,
         Err(error) => {
-            show_discovery_error(&format!("Directory discovery failed: {error}"))?;
-            return Ok(());
+            let error = format!("Directory discovery failed: {error}");
+            show_discovery_error(&error)?;
+            return Err(error.into());
         }
     };
     let workspace_list = json_array(&workspaces, "workspaces")?;
@@ -667,22 +668,39 @@ fn select_agent(
 }
 
 fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
-    let status = Command::new("fzf")
+    let terminal = File::open("/dev/tty").ok();
+    let mut child = Command::new("fzf")
         .args([
             "--disabled",
+            "--no-input",
             "--no-multi",
             "--header",
             error,
-            "--bind=esc:abort,ctrl-c:abort",
+            "--bind=esc:abort,ctrl-c:abort,enter:abort,ctrl-m:abort",
         ])
         .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
+        .stdout(terminal.map(Stdio::from).unwrap_or_else(Stdio::null))
         .stderr(Stdio::inherit())
-        .status()?;
-    if !status.success() && status.code() != Some(130) {
-        return Err(format!("fzf exited with status {status}").into());
+        .spawn()
+        .map_err(|view_error| format!("{error}; failed to open error view: {view_error}"))?;
+    child
+        .stdin
+        .take()
+        .ok_or_else(|| format!("{error}; failed to provide error view input"))?
+        .write_all(b"\n")
+        .map_err(|view_error| {
+            format!("{error}; failed to provide error view input: {view_error}")
+        })?;
+    let status = child
+        .wait()
+        .map_err(|view_error| format!("{error}; failed to wait for error view: {view_error}"))?;
+    if status.success() {
+        return Err(format!("{error}; error view closed successfully").into());
     }
-    Ok(())
+    if status.code() == Some(130) {
+        return Ok(());
+    }
+    Err(format!("{error}; error view exited with status {status}").into())
 }
 
 fn run_fzf(
