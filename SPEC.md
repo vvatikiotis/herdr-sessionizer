@@ -2,198 +2,157 @@
 
 ## Problem Statement
 
-A Herdr user needs to find a project directory, return to its existing workspace, or create a workspace without assembling terminal commands. Open workspaces should remain easy to reach while searching for unopened projects, and the user should be able to switch back to the last visited workspace even after changing focus through the sidebar.
+A Herdr user needs one picker to find a project directory, return to an existing workspace, create a workspace, or jump directly to a nested agent. Open workspaces must remain easy to reach while searching for unopened projects. Navigation history must survive command invocations and omit closed or internal pool workspaces.
 
-Project identity should not change because a pane moves into a subdirectory. Navigation history should survive command invocations and skip workspaces that have closed.
+Project identity is label/basename based. A pane changing directory must not redefine its workspace. The picker must make agent status, navigation failures, omitted workspaces, and directory-configuration failures visible instead of silently choosing another target.
 
-This document describes the existing, independent Herdr Sessionizer plugin: its directory picker, focus-history tracker, jump-back command, and plugin lifecycle hooks. It is not a specification for the surrounding Herdr configuration.
+This document describes the independent Herdr Sessionizer plugin: its picker, nested-agent navigation, directory discovery, focus history, jump-back command, and lifecycle hooks. The surrounding Herdr configuration and popup caller remain outside the plugin boundary.
 
 ## Solution
 
-Provide a terminal directory picker with open workspaces first and other project directories below a separator. Order open workspaces by visit history, with the previous workspace before the current workspace. Show running-agent counts beside open workspace entries.
+Provide a terminal picker with open workspaces first, nested agent rows under their parent workspaces, and unopened directory candidates below a separator. Preserve workspace recency ordering. Selecting a workspace focuses it; selecting an agent focuses its captured tab and then pane; selecting an unopened directory creates and focuses a workspace.
 
-Selecting a directory focuses the workspace with the same directory basename, if one exists. Otherwise, use the sibling shell-pool tool when installed to create a workspace with a warm shell, matching workspace/tab names, and the selected directory. If the tool is absent, create and focus a workspace through Herdr and name its initial tab when Herdr returns a tab identifier.
+Display every reported agent in the snapshot, including `working`, `done`, `idle`, `blocked`, `unknown`, and unexpected statuses. Render `working` yellow, `done` green, `blocked` red, `idle` with the terminal default color, and `unknown` or unexpected statuses grey. Keep status text readable in addition to color.
 
-Maintain persistent, unique workspace visit history through plugin startup, workspace-focus, and pane-exit hooks. Exclude the pool from that history. When shell exit closes a workspace and Herdr falls back to the pool, restore a surviving user workspace. A separate jump-back command toggles between the two most recently visited workspaces that remain open.
+Search retains workspace rows. A matching workspace shows all of its agents; a nonmatching workspace shows only agents whose names or types match. The first matching row in display order is selected. Agent-selection failures remain visible and retryable in the open picker.
 
-The plugin owns these behaviors. Herdr supplies workspace, pane, agent, and server operations; fzf supplies the picker. Host key bindings and popup presentation are caller-owned integrations.
+Read directory candidates from an executable-relative `directories.toml` when present. Ship the current choices, preserve built-in fallback choices when the file is absent, validate the schema and paths strictly, and keep configuration or discovery errors in an error-only picker view until dismissal. The directory configuration affects `pick` only; tracking, jump-back, and pane-exit recovery remain independent.
+
+Maintain persistent, unique workspace visit history through plugin startup, workspace-focus, and pane-exit hooks. Exclude the reserved pool workspace. When shell exit closes a workspace and Herdr falls back to the pool, restore a surviving user workspace. A separate jump-back command toggles between the two most recently visited workspaces that remain open.
 
 ## User Stories
 
-1. As a terminal user, I want one directory picker for open and unopened projects, so that I can switch tasks without choosing separate commands.
-2. As a terminal user, I want the picker to start the Herdr server when necessary, so that I can invoke it before the server is running.
-3. As a terminal user, I want project directories discovered under my vault and development roots, so that I do not maintain a complete project list manually.
-4. As a terminal user, I want common personal directories included explicitly, so that I can open workspaces outside those discovery roots.
-5. As a terminal user, I want archive and synchronization directories excluded from development discovery, so that they do not clutter project choices.
-6. As a terminal user, I want duplicate directory candidates removed, so that each path appears once within its candidate group.
-7. As a terminal user, I want open workspaces shown above unopened directories, so that existing tasks remain immediately accessible.
-8. As a terminal user, I want the previous workspace listed first, so that returning to the task I just left takes little effort.
-9. As a terminal user, I want the current workspace listed after the previous workspace, so that I can recognize my current context.
-10. As a terminal user, I want older visited workspaces ordered by recency, so that frequently revisited tasks remain easy to find.
-11. As a terminal user, I want open workspaces without visit history included too, so that the picker does not hide existing tasks.
-12. As a terminal user, I want the internal shell-pool workspace excluded from the picker, visit history, and jump-back, so that implementation infrastructure is never treated as a project.
-13. As a terminal user, I want a workspace label matched to a discovered directory before using a pane's working directory, so that changing directories inside a pane does not redefine the project.
-14. As a terminal user, I want a pane-directory fallback when no discovered directory matches a workspace label, so that workspaces outside the discovery roots can still appear.
-15. As a terminal user, I want directories whose basenames already label open workspaces omitted from the unopened group, so that they are not offered as new workspaces.
-16. As a terminal user, I want unopened directory choices available when no user workspace exists, so that I can create my first workspace.
-17. As a terminal user, I want home-relative labels for open workspace paths, so that long paths are easier to scan.
-18. As a terminal user, I want per-agent counts beside open workspaces, so that I can see where agent sessions are running.
-19. As a terminal user, I want open workspaces to remain visible while my query filters unopened directories, so that searching does not remove my existing tasks from view.
-20. As a terminal user, I want the picker to move to a matching open workspace when possible, so that accepting a search favors an existing task.
-21. As a terminal user, I want Ctrl-Space to accept the selected entry, so that I can use that shortcut in addition to the picker's normal acceptance behavior.
-22. As a terminal user, I want selecting an existing workspace's directory to focus that workspace, so that I do not create a duplicate task.
-23. As a terminal user, I want selecting an unopened directory to create and focus a workspace there, so that I can begin work immediately.
-24. As a terminal user, I want new workspaces and their initial tabs named after the selected directory, so that I can recognize them later.
-25. As a calling program, I want a successful selection to print its resolved absolute directory, so that I can consume the result without parsing display annotations.
-26. As a terminal user, I want leaving the picker without a selection to avoid creating or focusing a workspace, so that I can dismiss it safely.
-27. As a popup caller, I want an explicitly identified picker pane closed on exit, so that the temporary picker does not remain open.
-28. As a terminal user, I want workspace focus changes tracked outside the picker too, so that sidebar navigation updates my previous-workspace target.
-29. As a terminal user, I want repeated visits to promote a workspace without duplicating it in history, so that recency remains meaningful.
-30. As a terminal user, I want history retained in my user state directory, so that separate invocations share navigation context.
-31. As an existing user, I want legacy current/previous state imported when full history is absent, so that upgrading preserves my recent navigation.
-32. As a terminal user, I want closed workspace identifiers removed from history, so that jump-back can choose a remaining visited workspace.
-33. As a terminal user, I want repeated jump-back invocations to alternate between the latest two available workspaces, so that I can move between tasks without reopening the picker.
-34. As a terminal user, I want jump-back to do nothing when no previous workspace remains, so that zero or one open workspace is handled safely.
-35. As a terminal user, I want a failed jump-back focus operation to leave the previous target available, so that a failed switch does not count as a successful visit.
-36. As a plugin installer, I want declared startup, focus, and pane-exit hooks and platform/version requirements, so that Herdr can run history tracking and shell-exit focus recovery through its plugin lifecycle.
-37. As a terminal user, I want Ctrl+d in the final shell of a workspace to return from the pool to a surviving user workspace, so that closing a project does not leave me in internal infrastructure.
+1. As a terminal user, I want open and unopened projects in one picker, so that I can switch tasks without assembling commands.
+2. As a terminal user, I want open workspaces ordered by recent visits, so that the workspace I just left is easy to reach.
+3. As a terminal user, I want open workspaces retained while searching, so that a directory query does not hide existing tasks.
+4. As a terminal user, I want each reported agent nested under its workspace, so that I can identify its context.
+5. As a terminal user, I want every reported agent shown regardless of status, so that idle, blocked, done, and unknown agents remain reachable.
+6. As a terminal user, I want agent names and types displayed, so that I can recognize sessions.
+7. As a terminal user, I want duplicate agent labels distinguished by pane ID, so that I can choose the intended session.
+8. As a terminal user, I want missing names to use a readable fallback label, so that incomplete metadata does not hide an agent.
+9. As a terminal user, I want exact status text and colors, so that the picker does not invent state meanings.
+10. As a terminal user, I want `working` yellow, `done` green, `blocked` red, `idle` terminal-default, and unknown or unexpected statuses grey, so that status remains understandable and uncertainty is visible.
+11. As a terminal user, I want a stable agent snapshot while choosing, so that retrying does not silently retarget a changed agent record.
+12. As a terminal user, I want searches to match workspace and agent name/type fields, so that I can navigate by project or agent.
+13. As a terminal user, I want a matching workspace to reveal all of its agents, so that a project search shows its complete agent context.
+14. As a terminal user, I want only matching agents under a nonmatching workspace, so that agent searches reduce clutter.
+15. As a terminal user, I want the first matching row in display order selected, so that acceptance is predictable across workspaces and agents.
+16. As a terminal user, I want agent selection to activate the correct workspace and focus its captured tab, then pane, so that I arrive at the selected agent.
+17. As a terminal user, I want missing tab or pane IDs rejected before focus changes, so that incomplete metadata cannot cause partial navigation.
+18. As a terminal user, I want stale or failed agent targets reported inside the picker, so that I can retry or dismiss without losing the error.
+19. As a terminal user, I want a successful agent selection to print its parent workspace directory and refresh history, so that existing callers retain the directory-output contract.
+20. As a terminal user, I want workspaces without usable directory paths named in a persistent warning, so that omitted entries are explainable.
+21. As a terminal user, I want project directories discovered under configured roots at configured depths, so that I do not maintain every project manually.
+22. As a terminal user, I want explicit included directories, exact exclusions, and duplicate removal, so that candidate discovery is predictable.
+23. As a terminal user, I want discovered directory symlinks validated as directory targets without traversing them, so that linked projects are available without cycles.
+24. As a terminal user, I want configuration and discovery errors visible until dismissal, so that a temporary popup does not hide the cause.
+25. As a terminal user, I want invalid directory configuration not to break tracking, jump-back, or pane-exit recovery, so that unrelated navigation continues working.
+26. As a terminal user, I want selecting an existing workspace directory to focus that workspace, so that I do not create a duplicate task.
+27. As a terminal user, I want selecting an unopened directory to create and focus a workspace there, so that I can begin work immediately.
+28. As a terminal user, I want shell-pool delegation when the optional sibling tool exists, and ordinary Herdr creation when it does not.
+29. As a terminal user, I want Ctrl+d in the final shell of a workspace to return from the pool to a surviving user workspace.
+30. As a terminal user, I want repeated jump-back invocations to toggle between the two most recent open user workspaces.
+31. As a popup user, I want Escape, Ctrl+C, or Enter to dismiss a configuration/discovery error, so that I can acknowledge it without navigating.
+32. As a calling program, I want error dismissal to return failure with the error on stderr and stdout empty, so that acknowledgement does not conceal a failed operation.
+33. As a user, I want both the original and display errors reported if the error view cannot open, so that a UI failure does not hide the cause.
+34. As a maintainer, I want tests for the approved search, invalid-configuration, missing-metadata, and filesystem-error cases, so that passing tests substantiate those requirements.
 
 ## Implementation Decisions
 
 ### Plugin boundary and runtime
 
-- The user-facing Rust binary accepts `pick` and `jump-back`. Internal `track` and `after-pane-exit` modes support history tracking and shell-exit focus recovery through manifest hooks. The picker, jump-back, and pane-exit handling share the same tracker rather than implementing separate history rules.
-- Implement the commands in one Rust binary. Herdr and fzf remain external runtime tools; Rust parses Herdr JSON instead of requiring jq. The Cargo build output must be installed beside the plugin manifest as `herdr-sessionizer`.
-- The manifest identifies the plugin as `user.herdr-sessionizer`, display name `Herdr Sessionizer History`, version `0.1.0`, minimum Herdr version `0.9.3`, with Linux and macOS declared as supported platforms.
-- Register `./herdr-sessionizer track` for plugin startup and `workspace.focused`, and `./herdr-sessionizer after-pane-exit` for `pane.exited`. The manifest does not register a picker key binding or automatically launch the picker.
-- The shell-pool executable is an optional integration. Look for `herdr-shell-pool/herdr-shell-pool-bin` beside the sessionizer plugin directory, resolved from the running executable's location. Keep the reserved workspace label `__herdr_shell_pool__` excluded from picker choices. No manifest dependency, key-binding change, or PATH lookup is added.
+- The user-facing Rust binary accepts `pick` and `jump-back`. Internal `track` and `after-pane-exit` modes support lifecycle hooks.
+- The manifest identifies `user.herdr-sessionizer`, requires Herdr 0.9.3 or newer, and declares Linux and macOS support. It registers startup and `workspace.focused` tracking plus `pane.exited` recovery. It does not register a picker key binding.
+- Herdr supplies workspace, pane, agent, and server operations. fzf supplies the picker. The plugin owns picker behavior, navigation, history, and temporary-file cleanup.
+- Popup size and key bindings are caller-owned. The surrounding caller may set popup height to 95% while leaving width unchanged in its `../config.toml`; that is an integration choice, not a plugin requirement. The plugin must retain its boundary and must not edit that configuration.
+- The sibling `herdr-shell-pool/herdr-shell-pool-bin` beside the plugin directory is optional. The reserved label `__herdr_shell_pool__` is excluded even when the executable is absent.
 
-### Server and Herdr contracts
+### Workspace, agent, and server contracts
 
-- The picker checks `herdr status server`. If unavailable, it starts `herdr server` detached, redirects server output to a temporary-system log, and checks readiness up to 50 times with 0.1-second waits. It then proceeds; it does not implement a separate timeout error message.
-- The tracker and jump-back do not start the server themselves.
-- Consume workspace records from `result.workspaces`, using `workspace_id`, `label`, and `focused`; pane records from `result.panes`, using `workspace_id`, `cwd`, and `foreground_cwd`; and agent records from `result.agents`, using `workspace_id` and `agent`.
-- Refresh history before building picker candidates, then take workspace, pane, and agent snapshots. Do not read Herdr's saved session document to infer project identity.
-- Focus an existing workspace by identifier without invoking shell pool. For a new workspace when the sibling tool exists, invoke it with `new-workspace --cwd <selected-directory> --label <basename>`, discard its stdout, and require successful exit before history refresh and directory output. The tool owns destination setup, initial-tab naming, focus, and replenishment.
-- On tool failure, propagate an error without retrying ordinary workspace creation, because a destination may already exist. This first slice does not deliver a Herdr failure notification.
-- When the tool is absent, preserve ordinary creation with the selected directory as `--cwd`, its basename as `--label`, and `--focus`. Rename the initial tab only if the response contains a nonempty `result.tab.tab_id`. A missing tab identifier does not prevent history refresh or directory output. This existing path remains silent; descriptive fallback notifications are not implemented yet.
+- The picker ensures the Herdr server is ready, then refreshes history and takes workspace, pane, and agent snapshots. Tracking and jump-back do not start the server.
+- Workspace records use `workspace_id`, `label`, and `focused`; pane records use `workspace_id`, `cwd`, and `foreground_cwd`; agent records use workspace, tab, pane, display/name/type, and `agent_status` fields as available.
+- Agent rows are associated by workspace ID, preserve Herdr's returned order, and retain captured tab and pane IDs. Selection focuses the captured tab first and pane second. It does not search by name, fall back to another target, create a workspace, or roll back a successful tab focus.
+- Missing IDs are validation errors before any focus operation. Stale targets and focus failures are visible in the still-open picker and can be retried with the same snapshot or dismissed. The picker pane and temporary files still clean up on exit.
+- A successful workspace or agent selection refreshes history before printing the resolved absolute directory. Agent status styling and labels never contaminate that output.
 
-### Directory discovery and workspace identity
+### Directory configuration and discovery
 
-- Discover directory and symbolic-link entries under the user's `VAULT` and `devel` roots at depths one through three. Prune the development root's `Archive`, `.sync`, and `.SynologyWorkingDirectory` entries.
-- Append the user's `dotfiles`, `Notes`, `Downloads`, `Work`, `devel`, and `Mail` directories explicitly. Preserve first occurrence when deduplicating path strings.
-- The roots and supplemental directory names are currently fixed conventions, not settings exposed by the plugin. Explicit entries are not checked for existence before presentation.
-- For each open user workspace, first use the first discovered path whose basename matches its label. Otherwise use the first pane belonging to that workspace, preferring `cwd` and then `foreground_cwd` when the former is null or absent. Do not search additional panes for a better fallback.
-- Omit workspaces without a usable resolved candidate path. Deduplicate resolved open-workspace paths.
-- Exclude an available directory from the unopened group when its basename matches any open user-workspace label. This rule must also work when the labels list is empty.
-- On selection, enter the directory and resolve it with the shell's `pwd`, then derive its basename. Use the first non-pool workspace with that label as the existing-workspace match.
-- Workspace identity is basename/label based, not a canonical-path registry. Different directories with the same basename can therefore map to the same workspace; directory discovery order can affect which matching path is displayed.
+- The picker reads `directories.toml` beside the running executable on every invocation, independent of the caller's working directory. There is no alternate path or environment override.
+- The schema has optional top-level `roots`, `include`, and `exclude` lists. Each root has exactly `path` and positive integer `depth`. Unknown keys, invalid types, zero depth, relative paths, and paths containing `..` are errors.
+- Paths may be absolute or use `~/`. Normalize redundant separators, dot components, and trailing separators without resolving symlinks. Reject duplicate normalized roots, including duplicates with different depths.
+- A present file replaces built-in choices completely. Omitted lists and an empty file mean no discovered or explicitly included candidates. Only a missing file activates built-in fallback choices.
+- The confirmed initial configuration and built-in fallback use depth 3 for both roots. The currently checked-in editable file has since set `~/devel` to depth 4; that local configuration value does not change the confirmed default contract.
+- The shipped `directories.toml` currently includes `~/dotfiles`, `~/Notes`, `~/Downloads`, `~/Work`, `~/devel`, and `~/Mail`; excludes `~/devel/Archive`, `~/devel/.sync`, and `~/devel/.SynologyWorkingDirectory`; discovers `~/VAULT` at depth 3 and `~/devel` at depth 4. Roots are processed in file order, followed by includes in list order. The first normalized candidate occurrence wins. Depth one means immediate children, not the root itself.
+- Exclusions are exact normalized paths. An excluded root is skipped before access; an excluded discovered directory prunes its subtree. Explicit includes are processed independently and may re-add excluded or unavailable paths. Explicit includes are not existence-checked during loading and retain selection-time access behavior.
+- Discovered symlinks are offered only when their targets are existing directories and are never traversed. Broken links and links to files are omitted. Other target-check errors are discovery errors. This applies to configured roots and built-in fallback discovery, but not to explicit includes.
+- Missing or unreadable roots and other discovery failures stop normal candidate construction. The picker shows an error-only view until dismissal. It must not fall back to defaults, navigate, create a workspace, or affect `track`, `jump-back`, or `after-pane-exit`.
 
-### Picker ordering, display, and interaction
+### Configuration/discovery error dismissal
 
-- Present open workspaces in this order: most recent visited alternative, current workspace, remaining visited alternatives, then open workspaces absent from history in Herdr's returned order. Remove duplicate workspace identifiers and exclude the pool workspace throughout picker ordering.
-- Put a blank separator between open-workspace entries and unopened directory entries, including when the open group is empty.
-- Store each candidate as an actual path field followed by a tab-separated display field. Give fzf the display field while retaining the path for selection processing.
-- Abbreviate the home prefix to `~` for open-workspace display labels. Unopened-directory labels retain their full paths.
-- Count agent records by finding the first non-pool workspace whose label matches the displayed path's basename, then grouping its agents by type. This can differ from the workspace that supplied a pane-fallback path when that basename does not match the workspace label. Display recognized names as Pi, Codex, Hermes, OpenCode, OpenClaw, and Claude Code; retain unrecognized names. Append counts only when present, padding annotated open paths for alignment.
-- Use a reverse-layout, cycling picker with inline information, a rounded border, a directory-selection border label, raw mode, and Ctrl-Space acceptance.
-- On query changes, reload all open entries unchanged, the separator, and unopened entries filtered by fzf against their display field.
-- For a nonempty query after results settle, select the first matching open entry in the original open-workspace order. If none matches, target the first unopened-directory position. This behavior does not assert that a matching unopened entry exists.
-- Strip the display field before acting on the selection. Print the selected absolute directory only after the successful focus/create and subsequent history refresh.
-- An empty successful picker result exits without workspace selection. A normal fzf cancellation may return nonzero and propagate through strict shell handling; do not promise a zero cancellation status.
+- Configuration and discovery failures show an error-only view with no selectable workspace, agent, or directory actions. Keep it visible until Escape, Ctrl+C, or Enter. Enter acknowledges and dismisses the message; it never accepts a navigation target.
+- After dismissal, return a nonzero status, report the original error on stderr, and leave stdout empty. Acknowledgement does not make the failed operation successful. No exact numeric failure code or byte-for-byte message format is required.
+- Clean up temporary resources and attempt to close only the explicitly identified temporary picker pane under the existing ownership rules. Do not navigate or create anything as an error-handling action. Closing a caller-owned popup does not promise restoration of its previous focus.
+- If fzf cannot open the error view, report both the original failure and display failure on stderr, clean up, and return failure with empty stdout. Do not fall back or continue normal selection. Persistent visual display cannot be guaranteed when the display itself fails.
+- These rules apply only to configuration/discovery failures. Agent-selection errors retain their separate retryable flow, allowing another selection against the captured snapshot.
 
-### Persistent history
+### Picker ordering, display, and search
 
-- Store state under `XDG_STATE_HOME` when nonempty, otherwise the user's default local-state directory, within a `herdr-sessionizer` namespace.
-- Treat `workspace-history` as the authoritative newline-delimited sequence of workspace identifiers, newest first. Maintain `current-workspace` and `previous-workspace` as its first- and second-entry projections.
-- When full history is absent, seed it from the legacy current and previous projections in that order. An existing full-history file takes precedence, even if empty. If a refresh produces no identifiers, write one newline to the full-history file and empty projection files.
-- On each refresh, prepend focused workspace identifiers from the current Herdr response, then process stored history. Retain only identifiers still open and preserve each once. Do not add unvisited, unfocused workspaces to history merely because they are open.
-- Write full history through a temporary file in the state directory and rename it into place. Update the two projections afterward. This makes replacement of full history atomic, but does not make all three files a transaction or serialize concurrent invocations.
-- Exclude workspaces labelled `__herdr_shell_pool__` before collecting focused or open history identifiers. Never record the pool as a visit, even when it is focused. Remove saved pool entries and legacy current/previous pool entries during refresh, then rebuild both projections from the remaining user-workspace history. If only the pool remains, retain no current or previous user workspace.
+- Open workspaces appear in previous-first recency order, then the current workspace, remaining visited workspaces, and unvisited open workspaces in Herdr order. The pool is excluded. A separator remains between open and unopened groups, including when the open group is empty.
+- Keep workspaces with no agents visible and remove the old workspace-level agent counts. Show display name and agent type when both exist, otherwise whichever exists; use `Agent` with pane ID when neither exists. Disambiguate duplicate name/type labels with pane IDs independently of their statuses. Missing status is `unknown`; unexpected status text remains unchanged. Status/location records are snapshots, with no live refresh during search or retries.
+- Omit a workspace and its agents only when no usable directory path can be identified, not because of a new loading-time existence/access check. Preserve label-to-discovered-basename resolution before the first-pane cwd fallback and selection-time directory access checks.
+- A workspace row is followed by its nested agent rows. Workspace labels use `~` for the home prefix; unopened directory labels retain full paths. Omitted workspaces are named in a non-selectable warning such as `Hidden workspaces (directory unavailable): project-a, project-b`.
+- Empty query shows all agents. On a nonempty query, workspace rows remain available. A matching workspace shows every child agent; otherwise only matching child agents are shown. Unopened directories are filtered independently.
+- The first matching row in displayed order is selected, including an earlier matching agent before a later matching workspace. Compute both match and first-directory fallback positions from the filtered displayed list, never the original row count. A no-directory-match filter result is normal, and transporting multiple matching rows must not lose workspace rows on macOS awk.
+- If no open workspace or agent row matches, selection falls back to the first unopened-directory position; this does not promise that a directory match exists.
+- The picker uses reverse layout, cycling, inline information, a rounded border, ANSI styling, raw mode, and Ctrl-Space acceptance. Successful directory output is the resolved absolute path only. Cancellation and empty successful results do not create or focus a workspace.
 
-### Focus after shell exit
+### Persistent history and focus recovery
 
-- Herdr 0.9.5 emits `pane.exited` before removing a dead pane; it does not emit `workspace.closed` or `workspace.focused` for the resulting automatic workspace removal. Watching workspace-focus events alone cannot correct Ctrl+d fallback.
-- The pane-exit command reads the exiting pane and workspace identifiers from `HERDR_PLUGIN_EVENT_JSON`. Poll the pane list until the pane is absent, with a two-second retry window, then refresh history.
-- Recheck workspace state. Only if the exiting workspace has disappeared and Herdr currently focuses the reserved pool workspace, focus the most recent surviving user workspace and refresh history again. If history has no valid target, use the first existing non-pool workspace.
-- Do not override another user workspace's focus, redirect an explicit pool selection through ordinary tracking, or redirect when only a pane closed and its workspace remains. If no user workspace remains, do not create one automatically.
-- The correction is asynchronous; Herdr may briefly focus the pool before the hook redirects it. It uses the pool label only and does not require the shell-pool executable.
-
-### Jump-back and cleanup
-
-- Refresh history before reading the previous projection, so outside focus changes and workspace closures affect the target.
-- Exit successfully without focusing anything when no previous identifier remains.
-- Re-list workspaces and verify that the chosen identifier is still open. If absent, remove the previous projection and exit without focusing; do not retry another target during that invocation.
-- Focus a valid previous workspace, then refresh history again. The old current workspace becomes the next previous target, producing a toggle.
-- Propagate focus failure before the final history refresh. The failed target is not recorded as a successful new visit.
-- The picker removes its temporary candidate directory on exit. If `HERDR_SESSIONIZER_PANE_ID` is nonempty, it also attempts to close that pane, including on failure or cancellation, ignoring pane-close errors.
-- Refresh history after successful focus or creation even when event-driven tracking is also installed. Duplicate visits must remain harmless.
+- State is stored under `XDG_STATE_HOME`, or the user's default local state directory when it is empty, in a `herdr-sessionizer` namespace. `workspace-history` is authoritative, newest first; current and previous files are projections.
+- When full history is absent, import legacy current and previous state. Retain only open user workspaces, deduplicate IDs, remove closed IDs, and never record `__herdr_shell_pool__`. Replace full history through a temporary file and rename; concurrent invocations are not serialized.
+- Pane-exit recovery reads `HERDR_PLUGIN_EVENT_JSON`, waits for the exiting pane to disappear, refreshes history, and redirects focus only when the exiting workspace disappeared and the pool is focused. Prefer the most recent surviving user workspace, otherwise the first existing user workspace. Do not override another user focus or create a workspace.
+- Jump-back refreshes history, validates the previous workspace is still open, focuses it, and refreshes history again. It is a successful no-op with no previous target. It does not retry another target when validation fails, and a focus failure does not record a successful visit.
+- Existing workspaces are focused by ID. New workspaces delegate to shell pool when available, otherwise use Herdr creation with selected `--cwd`, basename `--label`, and `--focus`, renaming the initial tab when a tab ID is returned. Pool failure is propagated without a blind retry.
 
 ## Testing Decisions
 
-### Boundary and test quality
+- Test the compiled executable through its process boundary with temporary home/state/deployment directories and stub Herdr and fzf programs. Assert observable rows, status styling inputs, focus calls, creation calls, stdout, exit status, cleanup, visible errors, and persistent history, not helper names.
+- Use stateful stubs for history, closure, stale IDs, focus failures, configuration replacement, and discovery errors. Use real fzf and isolated Herdr only for terminal behavior that stubs cannot establish.
+- The latest audited Rust suite contains 37 test methods: 21 in `tests/commands.rs`, 12 in `tests/directory_config.rs`, 2 in `tests/shell_pool.rs`, and 2 in `tests/workspace_exit.rs`. The latest local `cargo test --all-targets` audit passed all 37. This command does not run the separate Python live regressions.
+- The passing Rust tests substantiate nested-agent association, status styling inputs and navigation, missing IDs, retryable agent errors, search candidate filtering, workspace retention in candidate streams, directory output, history, shell-pool behavior, common configuration validation/replacement, path normalization, depth/order, exclusions, common symlink cases, and stub-based error/cleanup behavior. They do not establish every requirement below or actual fzf selection/rendering merely by passing.
+- The isolated `tests/live_picker.py` regression has been used to verify real fzf search/ANSI rendering, nested-agent selection, cross-workspace tab/pane focus, directory output, filtered-position selection, and retryable agent-focus errors without touching the live session.
+- `tests/live_workspace_exit.py` verifies isolated Ctrl+d recovery with the real manifest and Herdr server. It does not prove the full picker-to-warm-workspace flow.
+- The final local verification of `tests/live_config_error.py` passed configuration and discovery error visibility, Escape/Ctrl+C/Enter dismissal, nonzero status, separate stdout/stderr checks, owned-pane cleanup, and failing-fzf error propagation. All three Python live scripts passed during that completion pass; the subsequent full mapping audit reran only Rust tests. These results establish tested scenarios on the local platform, not universal terminal/platform coverage.
 
-- Test the compiled Rust executable through its process boundary with temporary home/state directories and stub Herdr and fzf programs on `PATH`. No internal test interface is needed.
-- Assert observable candidate lists, focus/create/rename calls, selected-directory output, exit status, cleanup, and persistent history behavior. Avoid tests tied to helper-function names or intermediate variables.
-- Use stateful Herdr stubs for multi-step visit, closure, and toggle scenarios. Use an fzf stub to capture candidate input and return controlled selections.
-- Stub tests do not establish actual fzf behavior or event delivery. An opt-in real-Herdr regression creates an isolated server, links the actual plugin manifest, exits a test shell with Ctrl+d, and verifies return to the original user workspace. It does not use or modify the user's live session or registry. Real fzf integration remains deferred.
+### Acceptance coverage from issue #11
 
-### Existing automated coverage
-
-The Rust integration tests execute the compiled binary through this boundary. The original fourteen test methods cover:
-
-1. Focused-workspace promotion, removal of closed IDs, and unique history ordering.
-2. Migration from legacy current/previous state when full history is absent.
-3. Previous-first picker ordering and focusing the selected existing workspace.
-4. First-workspace creation when only the pool workspace is open, including initial-tab rename.
-5. Workspace-label path resolution before pane fallback.
-6. Agent-count annotations and empty successful picker selection, including optional pane close.
-7. Directory discovery depth, symbolic links, and development-directory pruning.
-8. Jump-back toggling between the two most recent open workspaces.
-9. Preserving the previous target when focus fails.
-10. Handling a previous workspace that closes before jump-back validates it, without retrying.
-11. Successful no-op jump-back with one or zero open workspaces.
-12. Using the default state directory when `XDG_STATE_HOME` is empty.
-13. Giving an existing empty full-history file precedence over legacy projections.
-14. Removing picker temporary files and closing its pane after fzf fails.
-
-A further executable-level test installs a fake sibling shell-pool tool and verifies that new-project selection delegates the selected directory and name, suppresses tool stdout, and refreshes history without ordinary workspace creation or tab rename. This checks the integration contract, not a live Herdr move.
-
-Two history regression tests verify pool exclusion: one covers a focused pool, saved pool entries, legacy state import, and a pool-only session; the other confirms jump-back skips a saved pool entry and preserves user-workspace history. A standalone-installation test copies sessionizer into its deployed directory layout without a sibling shell-pool directory. It verifies ordinary new-workspace creation and tab naming, existing-workspace focus, jump-back, selected-directory output, and history cleanup despite a focused, previously recorded pool workspace. Two pane-exit regression methods verify waiting for removal before restoring the most recent user workspace, and preserving focus for another user workspace, a surviving source workspace, or a pool-only session. The current Rust suite has twenty test methods.
-
-The opt-in `tests/live_workspace_exit.py` regression reproduces the native Ctrl+d focus fallback using Herdr 0.9.5 and the real plugin manifest. It was observed failing before the fix and passing afterward in an isolated server. A reserved-label stand-in workspace suffices; no shell-pool installation is needed.
-
-### Additional checks not established by those tests
-
-- The full live picker-to-warm-workspace flow, including terminal identity, selected directory, workspace/tab labels, history, and focus. The isolated shell-exit checks do not exercise fzf or prove all of these together.
-- Real fzf query reloads, result selection, separator handling, Ctrl-Space acceptance, no-match behavior, and cancellation status.
-- Directory cases beyond the tested examples: missing or unreadable roots, missing explicit directories, basename collisions, and additional shell-sensitive path characters.
-- Server startup success and readiness exhaustion, malformed or failed Herdr responses, and failures after workspace creation.
-- Temporary-directory removal and optional pane-close attempts across all exit paths, beyond the tested failure-cleanup scenario.
-- Startup-hook delivery and lifecycle behavior beyond the tested Herdr 0.9.5/macOS shell-exit scenario. The isolated regression establishes manifest loading and pane-exit/focus hook delivery for that scenario only; Linux remains unverified.
+- Keep the existing compiled-executable boundary with temporary home/state/deployment directories. Use stub Herdr calls for observable actions and real fzf in isolated PTYs for terminal behavior. No new internal parser test interface is required.
+- Search priority: add a real-fzf case where an earlier agent and a later workspace both match. After filtering settles, assert that the earlier agent is highlighted/accepted. A predetermined stub selection is not sufficient evidence.
+- Invalid configuration: cover scalar/list mismatches, non-string paths, non-integer depths, and missing required root path/depth fields. Assert clear errors, empty stdout, no navigation/creation, and failure after dismissal.
+- Missing metadata: assert the visible `Agent` fallback with pane ID when available and the persistent warning naming omitted workspaces. Verify that warning text is not selectable.
+- Filesystem failures: cover unreadable roots and non-NotFound symlink-target errors with deterministic fixtures. If permissions cannot be tested reliably on the host, explicitly report that limitation; another filesystem error is not proof of permission-specific behavior.
+- Error dismissal: for each of Escape, Ctrl+C, and Enter, verify that the real error view is visible and the process remains active before the key. Then assert normal dismissal, nonzero status, empty stdout, stderr error, temporary cleanup, and the owned pane-close request. Cover configuration and discovery entry points across these cases.
+- Establish a controlling terminal correctly and use bounded waits for observable states. A timeout or force-killed process is a verification failure, not a successful skip of dismissal/cleanup assertions.
+- Test unavailable/failing fzf with controlled fixtures; assert both original and display errors, nonzero status, empty stdout, cleanup, and no navigation.
+- These remain acceptance requirements even though issue #11 is closed. Implemented assertions cover the approved cases, but the full mapping audit still identified partial coverage, including warning non-selectability and permission-specific unreadable roots. A symlink-loop regression establishes a non-NotFound target error, not permission-denied behavior. Limit further changes to missing assertions and implementation fixes they prove necessary; do not add unrelated features, refactoring, live-topology changes, or deployment.
 
 ## Out of Scope
 
-- The wider Herdr configuration, its key choices, popup size, themes, terminal settings, or deployment-specific absolute command locations.
-- Shell-pool provisioning, warm-pane movement, destination setup, and replenishment internals, which belong to the shell-pool tool. Sessionizer only delegates new workspace creation when that optional tool is installed.
-- Tab/split creation policies, last-tab restoration, and editor navigation plugins.
-- Descriptive fallback/failure notifications and outcome reconciliation after uncertain workspace creation.
-- Herdr Navigator's picker, history, pinning, and independent jump-back implementation.
-- Installing or enabling the plugin automatically, registering new picker commands in Herdr, or publishing a package.
-- Session snapshot restoration, closed-workspace resurrection, remote project discovery, project creation, or filesystem changes beyond temporary files and navigation state.
-- Configurable discovery roots, custom workspace naming, unique path-based workspace identity, or changes to current basename-collision behavior.
-- New concurrency locking, transactional multi-file state updates, custom error recovery, or guarantees for overlapping event handlers.
-- Treating agent counts as health, completion, or activity-status indicators.
-- New implementation work or expanded tests as part of generating this document.
+- The wider Herdr configuration, caller-owned popup size or key choices, themes, terminal settings, and deployment-specific command locations. Popup height 95% with unchanged width is an integration note, not a plugin requirement.
+- Shell-pool provisioning, warm-pane movement, destination setup, and replenishment internals.
+- Live agent status updates, status-based filtering or ordering, agent control, prompt sending, or status inference.
+- Loading-time existence checks for explicit includes, glob exclusions, environment expansion, relative paths, alternate configuration paths, or recursive symlink traversal.
+- Unique canonical-path workspace identity, custom workspace naming, sorting discovery results, and changes to basename collision behavior.
+- Descriptive fallback notifications and outcome reconciliation after uncertain workspace creation.
+- New concurrency locking, transactional multi-file state updates, or guarantees for overlapping event handlers.
+- Automatic plugin installation, key-binding registration, package publication, session restoration, closed-workspace resurrection, remote discovery, or project creation.
+- Product implementation or expanded tests as part of maintaining this document.
 
 ## Further Notes
 
-- This document records observed behavior, not a normative policy for cases the code does not define. Failures of required Herdr operations and fzf propagate as nonzero command results; malformed Herdr JSON fails during Rust JSON parsing. Server-status failures trigger startup and polling, but readiness exhaustion has no dedicated error. Missing or unreadable discovery roots can make the picker fail.
-- Workspace and directory matching uses the first matching label/path in the order returned or discovered. Same-basename collisions are not resolved by canonical path.
-- A nonempty picker query with no matching open workspace targets the first unopened-entry position, even when no unopened entry matches. Cancellation may return nonzero. These are current implementation behaviors, not promises of a preferred user experience.
-- History replacement is atomic only for the full-history file. Tracker invocations are not serialized, so overlapping updates can race; the spec does not define a concurrency guarantee.
-- Rust tests use stub Herdr and fzf programs; the opt-in Python shell-exit regression additionally uses a real disposable Herdr server.
-- Additional-check items identify behavior not established by automated tests. They do not, by themselves, define missing product requirements or approved feature work.
-- The document uses the to-spec section format and is stored locally; it is not published to an issue tracker.
-- All nine Bash test methods passed when the original implementation was inspected. Rust process-level tests now cover the replacement implementation. A real Herdr shell-exit regression is available; real fzf integration remains deferred.
-- The plugin manifest's display name emphasizes history, but this specification covers the complete sessionizer, including the picker and jump-back entry points.
+- GitHub issues #1 through #11 are closed. Directory-configuration completion and the coverage/dismissal follow-up were verified and merged into `main`. Issue closure and merging do not establish deployment or exhaustive test coverage; use actual assertions and recorded runs as evidence.
+- Issue #11 supplies the latest confirmed coverage and configuration/discovery dismissal requirements. Its dismissal contract takes precedence over earlier unspecified key/output/status behavior; it does not change retryable agent-selection errors.
+- This document distinguishes required behavior from observed implementation and test evidence. Error-dismissal verification is no longer a known failure. Passing the existing suite does not establish every requirement: the latest full mapping audit identified remaining direct-assertion and platform-coverage gaps. Updating this document does not authorize implementation.
+- Workspace and directory matching use the first matching label/path in returned or discovered order. Same-basename collisions are not resolved by canonical path.
+- The picker may briefly show the pool during asynchronous pane-exit recovery. The reserved label, not the shell-pool executable, controls pool exclusion.
+- The plugin remains an independent component. Caller-owned popup integration may use `../config.toml`, but the plugin does not require or modify that integration.
