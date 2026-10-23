@@ -991,7 +991,7 @@ fn picker_selects_nested_agent_by_captured_tab_and_pane_ids() {
         r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
     )
     .unwrap();
-    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"wA:t1","pane_id":"wA:p1","display_name":"review","agent":"codex","agent_status":"working"},{"workspace_id":"wA","tab_id":"wA:t2","pane_id":"wA:p2","display_name":"review","agent":"codex","agent_status":"blocked"}]}}"#).unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"wA:t1","pane_id":"wA:p1","display_name":"review","agent":"codex","agent_status":"working"},{"workspace_id":"wA","tab_id":"wA:t2","pane_id":"wA:p2","display_name":"review","agent":"codex","agent_status":"blocked"},{"workspace_id":"wA","tab_id":"wA:t3","pane_id":"wA:p3","display_agent":"schema-name","agent":"hermes","agent_status":"idle"},{"workspace_id":"wA","tab_id":"wA:t4","pane_id":"wA:p4","name":"done-job","type":"pi","agent_status":"done"},{"workspace_id":"wA","tab_id":"wA:t5","pane_id":"wA:p5","display_name":"odd","agent":"pi","agent_status":"paused"},{"workspace_id":"wA","tab_id":"wA:t6","pane_id":"wA:p6","display_name":"missing","agent":"pi"}]}}"#).unwrap();
     executable(
         &bin.join("herdr"),
         r###"#!/bin/sh
@@ -1036,10 +1036,26 @@ sed -n '2p' "$FIXTURE/candidates"
     );
     let candidates = fs::read_to_string(root.join("candidates")).unwrap();
     assert!(candidates.contains("review (codex)"));
+    assert!(candidates.contains("schema-name (hermes)"));
     assert!(candidates.contains("[working]"));
     assert!(candidates.contains("[blocked]"));
-    assert!(candidates.contains("wA:p1"));
-    assert!(candidates.contains("wA:p2"));
+    assert!(candidates.contains("[idle]"));
+    assert!(candidates.contains("[done]"));
+    assert!(candidates.contains("[paused]"));
+    assert!(candidates.contains("[unknown]"));
+    assert!(candidates.contains("\u{1b}[33m[working]"));
+    assert!(candidates.contains("\u{1b}[31m[blocked]"));
+    assert!(candidates.contains("\u{1b}[39m[idle]"));
+    assert!(candidates.contains("\u{1b}[32m[done]"));
+    assert!(candidates.contains("\u{1b}[90m[paused]"));
+    assert!(candidates.contains("\u{1b}[90m[unknown]"));
+    for pane_id in ["wA:p1", "wA:p2"] {
+        assert!(candidates.lines().any(|line| {
+            line.split('\t')
+                .nth(1)
+                .is_some_and(|display| display.contains(pane_id))
+        }));
+    }
 }
 
 #[test]

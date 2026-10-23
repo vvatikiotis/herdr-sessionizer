@@ -18,6 +18,7 @@ from pathlib import Path
 import pty
 import struct
 import shutil
+import select
 import termios
 import signal
 import subprocess
@@ -100,6 +101,17 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
         data = cli("api", "snapshot")
         return data.get("result", data).get("snapshot", data.get("snapshot", data))
 
+    def read_pty(master, process, output, deadline, stop=None):
+        while process.poll() is None and time.monotonic() < deadline:
+            if stop and stop(output):
+                break
+            ready, _, _ = select.select([master], [], [], 0.1)
+            if ready:
+                try:
+                    output.extend(os.read(master, 65536))
+                except OSError:
+                    break
+
     def run_picker(*input_chunks: bytes, wait_for_text: bytes = b"", timeout: float = 15.0):
         master, slave = pty.openpty()
         fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 40, 120, 0, 0))
@@ -116,21 +128,15 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
         output = bytearray()
         try:
             deadline = time.monotonic() + timeout
-            while True:
-                if wait_for_text and wait_for_text in output:
-                    break
-                if process.poll() is not None:
-                    break
-                if time.monotonic() >= deadline:
-                    raise RuntimeError(f"picker did not render the requested state: {bytes(output)[-3000:]!r}")
-                import select
-
-                ready, _, _ = select.select([master], [], [], 0.1)
-                if ready:
-                    try:
-                        output.extend(os.read(master, 65536))
-                    except OSError:
-                        break
+            read_pty(
+                master,
+                process,
+                output,
+                deadline,
+                (lambda data: wait_for_text in data) if wait_for_text else None,
+            )
+            if wait_for_text and wait_for_text not in output:
+                raise RuntimeError(f"picker did not render the requested state: {bytes(output)[-3000:]!r}")
             if process.poll() is not None:
                 raise RuntimeError(f"picker exited before input (status {process.returncode}): {bytes(output)[-3000:]!r}")
             for chunk in input_chunks:
@@ -138,15 +144,7 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                     os.write(master, chunk)
                 except OSError as error:
                     raise RuntimeError(f"picker input failed: {error}; output={bytes(output)[-3000:]!r}") from error
-            while process.poll() is None and time.monotonic() < deadline:
-                import select
-
-                ready, _, _ = select.select([master], [], [], 0.1)
-                if ready:
-                    try:
-                        output.extend(os.read(master, 65536))
-                    except OSError:
-                        break
+            read_pty(master, process, output, deadline)
             if process.poll() is None:
                 process.send_signal(signal.SIGINT)
                 process.wait(timeout=3)
@@ -180,6 +178,7 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
             search_term = display or kind
             if not search_term:
                 raise AssertionError(f"agent has no searchable display/type metadata: {agent}")
+            status = agent.get("agent_status") or "unknown"
 
             code, screen = run_picker(str(search_term).encode() + b"\x1b[B\r", wait_for_text=str(search_term).encode())
             if code != 0:
@@ -193,6 +192,8 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                 raise AssertionError("agent selection did not focus the agent pane")
             if b"\x1b[" not in screen:
                 raise AssertionError("real fzf transcript contained no ANSI styling")
+            if f"[{status}]".encode() not in screen:
+                raise AssertionError(f"real fzf transcript omitted status text [{status}]: {screen[-3000:]!r}")
 
             # Keep the picker snapshot while making its captured pane stale.
             master, slave = pty.openpty()
@@ -205,15 +206,13 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                 os.write(master, str(search_term).encode() + b"\x1b[B\r")
                 error_output = bytearray()
                 deadline = time.monotonic() + 10
-                while time.monotonic() < deadline and b"Agent selection failed" not in error_output:
-                    import select
-
-                    ready, _, _ = select.select([master], [], [], 0.1)
-                    if ready:
-                        try:
-                            error_output.extend(os.read(master, 65536))
-                        except OSError:
-                            break
+                read_pty(
+                    master,
+                    picker,
+                    error_output,
+                    deadline,
+                    lambda data: b"Agent selection failed" in data,
+                )
                 if b"Agent selection failed" not in error_output:
                     raise AssertionError(f"stale target error was not visible in fzf; wrapper={((root / 'herdr-wrapper.log').read_text() if (root / 'herdr-wrapper.log').exists() else '')!r}: {bytes(error_output)[-2000:]!r}")
                 # Selecting another row retries the same snapshot and dismisses
@@ -224,15 +223,7 @@ with tempfile.TemporaryDirectory(prefix="hs-picker space-", dir="/tmp") as tempo
                 time.sleep(0.2)
                 os.write(master, b"\r")
                 deadline = time.monotonic() + 10
-                while picker.poll() is None and time.monotonic() < deadline:
-                    import select
-
-                    ready, _, _ = select.select([master], [], [], 0.1)
-                    if ready:
-                        try:
-                            error_output.extend(os.read(master, 65536))
-                        except OSError:
-                            break
+                read_pty(master, picker, error_output, deadline)
                 if picker.poll() is None:
                     raise AssertionError(f"picker did not recover after visible selection error: {bytes(error_output)[-3000:]!r}")
                 if picker.returncode != 0 or str(beta).encode() not in error_output:

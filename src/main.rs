@@ -187,10 +187,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         if selection.is_empty() {
             return Ok(());
         }
-        let row_fields = selection.split('\t').collect::<Vec<_>>();
-        let selected_path = row_fields.first().copied().unwrap_or(&selection);
-        let key = row_fields.get(2).copied().unwrap_or(selected_path);
-        let fields = key.split('|').collect::<Vec<_>>();
+        let (_selected_path, fields) = selection_fields(&selection);
         if fields.first() == Some(&"agent") {
             match select_agent(&fields, &open_workspaces) {
                 Ok(directory) => {
@@ -205,10 +202,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         }
         break selection;
     };
-    let row_fields = selection.split('\t').collect::<Vec<_>>();
-    let selected_path = row_fields.first().copied().unwrap_or(&selection);
-    let key = row_fields.get(2).copied().unwrap_or(selected_path);
-    let fields = key.split('|').collect::<Vec<_>>();
+    let (selected_path, fields) = selection_fields(&selection);
     let selected_path = if fields.first() == Some(&"workspace") {
         let id = fields.get(1).ok_or("workspace row has no identifier")?;
         open_workspaces
@@ -404,8 +398,9 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
         })
         .map(|agent| {
             let display_name = agent
-                .get("display_name")
+                .get("display_agent")
                 .and_then(Value::as_str)
+                .or_else(|| agent.get("display_name").and_then(Value::as_str))
                 .or_else(|| agent.get("name").and_then(Value::as_str));
             let agent_type = agent
                 .get("agent")
@@ -420,6 +415,7 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
             if label == "Agent" && !pane_id.is_empty() {
                 label = format!("Agent ({pane_id})");
             }
+            let base_label = label.clone();
             let status = agent
                 .get("agent_status")
                 .and_then(Value::as_str)
@@ -428,14 +424,10 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
                 "working" => "33",
                 "done" => "32",
                 "blocked" => "31",
-                "unknown" => "90",
+                "idle" => "39",
                 _ => "90",
             };
-            let status = if status == "idle" {
-                format!("[{status}]")
-            } else {
-                format!("\x1b[{color}m[{status}]\x1b[0m")
-            };
+            let status = format!("\x1b[{color}m[{status}]\x1b[0m");
             label.push(' ');
             label.push_str(&status);
             let search = match (display_name, agent_type) {
@@ -451,7 +443,7 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
                     .unwrap_or("")
                     .to_owned(),
                 pane_id: pane_id.to_owned(),
-                label: label.clone(),
+                label: base_label,
                 display: label,
                 search,
             }
@@ -469,6 +461,13 @@ fn disambiguate_agent_labels(rows: &mut [AgentRow]) {
             row.display = format!("{} ({})", row.display, row.pane_id);
         }
     }
+}
+
+fn selection_fields(selection: &str) -> (&str, Vec<&str>) {
+    let row_fields = selection.split('\t').collect::<Vec<_>>();
+    let selected_path = row_fields.first().copied().unwrap_or(selection);
+    let key = row_fields.get(2).copied().unwrap_or(selected_path);
+    (selected_path, key.split('|').collect())
 }
 
 fn lines_with_newline(lines: &[String]) -> String {
