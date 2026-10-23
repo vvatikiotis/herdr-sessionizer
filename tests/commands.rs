@@ -1220,3 +1220,203 @@ esac
     assert!(candidates.contains("Agent (p1)"));
     assert!(arguments.contains("Hidden workspaces (directory unavailable): missing"));
 }
+
+#[test]
+fn picker_orders_previous_current_remaining_history_then_unvisited_and_keeps_separator() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    for name in ["previous", "current", "visited", "unvisited"] {
+        fs::create_dir_all(home.join("VAULT").join(name)).unwrap();
+    }
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::write(state.join("workspace-history"), "previous\nvisited\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"current","label":"current","focused":true},{"workspace_id":"previous","label":"previous","focused":false},{"workspace_id":"visited","label":"visited","focused":false},{"workspace_id":"unvisited","label":"unvisited","focused":false},{"workspace_id":"pool","label":"__herdr_shell_pool__","focused":false}]}}"#,
+    )
+    .unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list'|'agent list') printf '%s\n' '{"result":{"panes":[],"agents":[]}}' ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > \"$FIXTURE/candidates\"\nexit 0\n",
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    let (open, unopened) = candidates.split_once("\n\n").unwrap();
+    let labels = open
+        .lines()
+        .filter_map(|line| line.split('\t').nth(1))
+        .map(|display| display.trim().to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        labels,
+        vec![
+            "~/VAULT/previous",
+            "~/VAULT/current",
+            "~/VAULT/visited",
+            "~/VAULT/unvisited"
+        ]
+    );
+    assert!(!unopened.is_empty());
+    assert!(!candidates.contains("__herdr_shell_pool__"));
+}
+
+#[test]
+fn picker_rejects_missing_pane_id_before_focus_and_does_not_retarget() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
+    )
+    .unwrap();
+    fs::write(
+        root.join("agents.json"),
+        r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"captured-tab","pane_id":""}]}}"#,
+    )
+    .unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  pane\ list) printf '%s\n' '{"result":{"panes":[]}}' ;;
+  agent\ list) cat "$FIXTURE/agents.json" ;;
+  tab\ focus|agent\ focus|workspace\ focus) printf '%s %s\n' "$1 $2" "$3" >> "$FIXTURE/actions"; exit 1 ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        r###"#!/bin/sh
+count=$(cat "$FIXTURE/fzf-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/fzf-count"; printf '%s\n' "$*" > "$FIXTURE/fzf-args-$count"
+cat > "$FIXTURE/candidates-$count"
+if [ "$count" -eq 1 ]; then sed -n '2p' "$FIXTURE/candidates-$count"; fi
+"###,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.stdout.is_empty());
+    assert!(!root.join("actions").exists());
+    assert!(
+        fs::read_to_string(root.join("fzf-args-2"))
+            .unwrap()
+            .contains("agent has no pane identifier")
+    );
+}
+
+#[test]
+fn picker_retries_the_captured_agent_after_metadata_changes_without_retargeting() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let home = root.join("home");
+    let state = root.join("state/herdr-sessionizer");
+    let bin = root.join("bin");
+    fs::create_dir_all(home.join("VAULT/project")).unwrap();
+    fs::create_dir_all(home.join("devel")).unwrap();
+    fs::create_dir_all(&state).unwrap();
+    fs::create_dir_all(&bin).unwrap();
+    fs::write(state.join("workspace-history"), "wA\n").unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[{"workspace_id":"wA","label":"project","focused":true}]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("agents.json"), r#"{"result":{"agents":[{"workspace_id":"wA","tab_id":"captured-tab","pane_id":"captured-pane","display_name":"review","agent":"codex"}]}}"#).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r###"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  workspace\ list) cat "$FIXTURE/workspaces.json" ;;
+  pane\ list) printf '%s\n' '{"result":{"panes":[]}}' ;;
+  agent\ list) cat "$FIXTURE/agents.json" ;;
+  tab\ focus) printf 'tab %s\n' "$3" >> "$FIXTURE/actions" ;;
+  agent\ focus)
+    printf 'pane %s\n' "$3" >> "$FIXTURE/actions"
+    count=$(cat "$FIXTURE/pane-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/pane-count"
+    if [ "$count" -eq 1 ]; then printf '%s\n' '{"result":{"agents":[{"workspace_id":"wA","tab_id":"new-tab","pane_id":"new-pane"}]}}' > "$FIXTURE/agents.json"; exit 1; fi
+    ;;
+  *) exit 1 ;;
+esac
+"###,
+    );
+    executable(
+        &bin.join("fzf"),
+        r###"#!/bin/sh
+count=$(cat "$FIXTURE/fzf-count" 2>/dev/null || printf 0); count=$((count + 1)); printf '%s\n' "$count" > "$FIXTURE/fzf-count"
+cat > "$FIXTURE/candidates-$count"
+sed -n '2p' "$FIXTURE/candidates-$count"
+"###,
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        output.stdout,
+        format!("{}\n", home.join("VAULT/project").display()).as_bytes()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("actions")).unwrap(),
+        "tab captured-tab\npane captured-pane\ntab captured-tab\npane captured-pane\n"
+    );
+}

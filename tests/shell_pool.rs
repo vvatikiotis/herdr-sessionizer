@@ -204,3 +204,66 @@ printf 'pool diagnostic output\n'
         "new\nold\n"
     );
 }
+
+#[test]
+fn pool_delegate_failure_is_reported_without_ordinary_create_retry_or_stdout() {
+    let fixture = TempDir::new().unwrap();
+    let root = fixture.path();
+    let home = root.join("home");
+    let project = home.join("devel/new-project");
+    let bin = root.join("bin");
+    let plugin = root.join("plugins/herdr-sessionizer");
+    let pool = root.join("plugins/herdr-shell-pool");
+    for path in [&project, &home.join("VAULT"), &bin, &plugin, &pool] {
+        fs::create_dir_all(path).unwrap();
+    }
+    let binary = plugin.join("herdr-sessionizer");
+    fs::copy(env!("CARGO_BIN_EXE_herdr-sessionizer"), &binary).unwrap();
+    fs::write(
+        root.join("workspaces.json"),
+        r#"{"result":{"workspaces":[]}}"#,
+    )
+    .unwrap();
+    script(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'status server') exit 0 ;;
+  'workspace list') cat "$FIXTURE/workspaces.json" ;;
+  'pane list') printf '%s\n' '{"result":{"panes":[]}}' ;;
+  'agent list') printf '%s\n' '{"result":{"agents":[]}}' ;;
+  'workspace create') echo ordinary-create >> "$FIXTURE/actions"; exit 1 ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+    script(
+        &bin.join("fzf"),
+        "#!/bin/sh\ncat > /dev/null\nprintf '%s\\n' \"$HOME/devel/new-project\"\n",
+    );
+    script(
+        &pool.join("herdr-shell-pool-bin"),
+        r#"#!/bin/sh
+count=$(cat "$FIXTURE/pool-count" 2>/dev/null || printf 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$FIXTURE/pool-count"
+printf 'pool failed\n' >&2
+exit 1
+"#,
+    );
+
+    let output = Command::new(binary)
+        .arg("pick")
+        .env("HOME", &home)
+        .env("FIXTURE", root)
+        .env("XDG_STATE_HOME", root.join("state"))
+        .env_remove("HERDR_SESSIONIZER_PANE_ID")
+        .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(output.stdout.is_empty());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("no creation retry was attempted"));
+    assert_eq!(fs::read_to_string(root.join("pool-count")).unwrap(), "1\n");
+    assert!(!root.join("actions").exists());
+}
