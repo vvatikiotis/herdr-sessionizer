@@ -187,7 +187,6 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         let selection = run_fzf(
             &open_file,
             &directory_file,
-            &open_rows,
             picker_header(warning.as_deref(), error_header.as_deref()).as_deref(),
         )?;
         if selection.is_empty() {
@@ -689,20 +688,57 @@ fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
 fn run_fzf(
     open_file: &Path,
     directory_file: &Path,
-    open_rows: &[String],
     header: Option<&str>,
 ) -> Result<String, Box<dyn Error>> {
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
-    let filter_open = format!(
-        r#"if [[ -z {{q}} ]]; then cat {open}; else matches=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open}); matches_file=$(mktemp "${{TMPDIR:-/tmp}}/herdr-sessionizer-matches.XXXXXX") || exit 1; printf '%s\n' "$matches" > "$matches_file"; awk -F'\t' -v matches_file="$matches_file" 'BEGIN {{ while ((getline line < matches_file) > 0) {{ split(line, fields, "\t"); if (fields[3] != "") matched[fields[3]] = 1; }} close(matches_file) }} {{ if (index($3, "workspace|") == 1) {{ print; next; }} split($3, parts, "|"); if (matched[$3] || matched["workspace|" parts[2]]) print; }}' {open}; awk_status=$?; rm -f -- "$matches_file"; if ((awk_status != 0)); then exit "$awk_status"; fi; fi"#
-    );
+    let filter_file = open_file.with_file_name("filter-open");
+    fs::write(
+        &filter_file,
+        r#"#!/bin/bash
+query=$1
+open=$2
+if [[ -z "$query" ]]; then
+    cat "$open"
+    exit 0
+fi
+matches_file=$(mktemp "${TMPDIR:-/tmp}/herdr-sessionizer-matches.XXXXXX") || exit 1
+trap 'rm -f -- "$matches_file"' EXIT
+fzf --delimiter=$'\t' --nth=4 --filter="$query" < "$open" > "$matches_file"
+fzf_status=$?
+if ((fzf_status != 0 && fzf_status != 1)); then
+    exit "$fzf_status"
+fi
+awk -F'\t' '
+    BEGIN {
+        while ((getline line < ARGV[1]) > 0) {
+            split(line, fields, "\t")
+            if (fields[3] != "") matched[fields[3]] = 1
+        }
+        close(ARGV[1])
+        ARGV[1] = ""
+    }
+    {
+        if (index($3, "workspace|") == 1) { print; next }
+        split($3, parts, "|")
+        if (matched[$3] || matched["workspace|" parts[2]]) print
+    }
+' "$matches_file" "$open"
+"#,
+    )?;
+    let mut permissions = fs::metadata(&filter_file)?.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        permissions.set_mode(0o700);
+        fs::set_permissions(&filter_file, permissions)?;
+    }
+    let filter = shell_quote(&filter_file.to_string_lossy());
     let reload = format!(
-        r#"{filter_open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
+        r#"{filter} {{q}} {open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
     );
-    let first_directory = open_rows.len() + 2;
     let selection = format!(
-        r#"if [[ -n {{q}} ]]; then match=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); if [[ -n "$match" ]]; then position=$(grep -Fxn -m 1 -- "$match" {open} | cut -d: -f1); printf 'pos(%s)\n' "$position"; else echo 'pos({first_directory})'; fi; fi"#
+        r#"if [[ -n {{q}} ]]; then match=$(fzf --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); filtered=$({filter} {{q}} {open}); if [[ -n "$match" ]]; then identity=$(printf '%s\n' "$match" | awk -F'\t' '{{print $3}}'); position=$(printf '%s\n' "$filtered" | awk -F'\t' -v identity="$identity" '$3 == identity {{print NR; exit}}'); fi; if [[ -n "$position" ]]; then printf 'pos(%s)\n' "$position"; else count=$(printf '%s\n' "$filtered" | awk 'NF {{count++}} END {{print count + 2}}'); printf 'pos(%s)\n' "$count"; fi; fi"#
     );
     let mut input = fs::read_to_string(open_file)?;
     input.push('\n');

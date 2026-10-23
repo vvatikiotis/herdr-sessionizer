@@ -58,6 +58,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
     beta.mkdir(parents=True)
     beta_two.mkdir(parents=True)
     (home / "devel").mkdir()
+    delta = home / "VAULT/delta"
+    delta.mkdir()
     plugin = root / "plugins/sessionizer"
     plugin.mkdir(parents=True)
     command_bin = root / "bin"
@@ -187,8 +189,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             agent_pane = beta_tab["root_pane"]["pane_id"]
             alpha_pane = alpha_tab["root_pane"]["pane_id"]
             # These are real Herdr-recognized agents in the disposable server.
-            cli("agent", "start", "zzagentunique", "--kind", "pi", "--pane", agent_pane, "--timeout", "60000", "--", "--no-session")
             cli("agent", "start", "alphaagentunique", "--kind", "pi", "--pane", alpha_pane, "--timeout", "60000", "--", "--no-session")
+            cli("agent", "start", "zzagentunique", "--kind", "pi", "--pane", agent_pane, "--timeout", "60000", "--", "--no-session")
             cli("plugin", "link", str(plugin), "--enabled")
 
             agents = snapshot()["agents"]
@@ -215,7 +217,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             # those already-emitted workspace rows.
             code, screen = run_picker(
                 str(search_term).encode(),
-                b"\x1b[B\r",
+                b"\r",
                 wait_for_text=str(search_term).encode(),
                 wait_after_first=str(search_term).encode(),
             )
@@ -228,6 +230,12 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 raise AssertionError("agent selection did not focus the beta workspace")
             if not any(item.get("pane_id") == agent_pane and item.get("focused") for item in focused["panes"]):
                 raise AssertionError("agent selection did not focus the agent pane")
+
+            # A directory-only query must target the first directory in the
+            # filtered display, not the first directory in the original input.
+            code, screen = run_picker(b"delta\r", wait_for_text=b"delta")
+            if code != 0 or str(delta).encode() not in screen:
+                raise AssertionError(f"directory-only selection chose the wrong row: {screen[-3000:]!r}")
             if b"\x1b[" not in screen:
                 raise AssertionError("real fzf transcript contained no ANSI styling")
             if f"[{status}]".encode() not in screen:
@@ -283,7 +291,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     picker.kill()
                     picker.wait()
 
-            print("PASS: real fzf search/ANSI, cross-workspace tab/pane focus, and retryable stale-target error")
+            print("PASS: real fzf offset selection, directory fallback, search/ANSI, cross-workspace focus, and retryable stale-target error")
         finally:
             if server.poll() is None:
                 subprocess.run([herdr, "--session", session, "server", "stop"], env=env, cwd=root, capture_output=True, timeout=5)
