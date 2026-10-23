@@ -309,51 +309,196 @@ fn json_array<'a>(value: &'a Value, name: &str) -> Result<&'a Vec<Value>, Box<dy
         .ok_or_else(|| format!("Herdr response has no result.{name} array").into())
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryConfig {
+    roots: Option<Vec<DirectoryRoot>>,
+    #[serde(rename = "include")]
+    includes: Option<Vec<String>>,
+    #[serde(rename = "exclude")]
+    excludes: Option<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DirectoryRoot {
+    path: String,
+    depth: usize,
+}
+
+struct LoadedDirectoryConfig {
+    roots: Vec<(PathBuf, usize)>,
+    includes: Vec<PathBuf>,
+    excludes: std::collections::HashSet<PathBuf>,
+}
+
 fn discover_directories(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
-    let vault = home.join("VAULT");
-    let devel = home.join("devel");
+    let config = load_directory_config(home)?;
     let mut directories = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    for root in [&vault, &devel] {
-        discover_under(root, home, 0, &mut directories, &mut seen)?;
+    for (root, depth) in &config.roots {
+        if config.excludes.contains(root) {
+            continue;
+        }
+        discover_under_config(
+            root,
+            depth,
+            0,
+            &config.excludes,
+            &mut directories,
+            &mut seen,
+        )?;
     }
-    for name in ["dotfiles", "Notes", "Downloads", "Work", "devel", "Mail"] {
-        let path = home.join(name);
-        if seen.insert(path.to_string_lossy().into_owned()) {
+    for path in config.includes {
+        if seen.insert(path.clone()) {
             directories.push(path);
         }
     }
     Ok(directories)
 }
 
-fn discover_under(
+fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn Error>> {
+    let config_path = std::env::current_exe()?
+        .parent()
+        .ok_or("running executable has no parent directory")?
+        .join("directories.toml");
+    let config = match fs::read_to_string(&config_path) {
+        Ok(contents) => toml::from_str::<DirectoryConfig>(&contents)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirectoryConfig {
+            roots: Some(vec![
+                DirectoryRoot {
+                    path: "~/VAULT".into(),
+                    depth: 3,
+                },
+                DirectoryRoot {
+                    path: "~/devel".into(),
+                    depth: 3,
+                },
+            ]),
+            includes: Some(
+                [
+                    "~/dotfiles",
+                    "~/Notes",
+                    "~/Downloads",
+                    "~/Work",
+                    "~/devel",
+                    "~/Mail",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            ),
+            excludes: Some(
+                [
+                    "~/devel/Archive",
+                    "~/devel/.sync",
+                    "~/devel/.SynologyWorkingDirectory",
+                ]
+                .into_iter()
+                .map(str::to_owned)
+                .collect(),
+            ),
+        },
+        Err(error) => return Err(format!("cannot read {}: {error}", config_path.display()).into()),
+    };
+
+    let roots = config
+        .roots
+        .unwrap_or_default()
+        .into_iter()
+        .map(|root| {
+            if root.depth == 0 {
+                return Err("directory root depth must be a positive integer".into());
+            }
+            Ok((normalize_config_path(&root.path, home)?, root.depth))
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let mut root_paths = std::collections::HashSet::new();
+    for (path, _) in &roots {
+        if !root_paths.insert(path.clone()) {
+            return Err(format!("duplicate directory root: {}", path.display()).into());
+        }
+    }
+    let includes = config
+        .includes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| normalize_config_path(&path, home))
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
+    let excludes = config
+        .excludes
+        .unwrap_or_default()
+        .into_iter()
+        .map(|path| normalize_config_path(&path, home))
+        .collect::<Result<std::collections::HashSet<_>, Box<dyn Error>>>()?;
+    Ok(LoadedDirectoryConfig {
+        roots,
+        includes,
+        excludes,
+    })
+}
+
+fn normalize_config_path(value: &str, home: &Path) -> Result<PathBuf, Box<dyn Error>> {
+    let path = if value == "~" {
+        home.to_path_buf()
+    } else if let Some(suffix) = value.strip_prefix("~/") {
+        home.join(suffix)
+    } else {
+        PathBuf::from(value)
+    };
+    if !path.is_absolute() {
+        return Err(format!("directory path must be absolute or home-relative: {value}").into());
+    }
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err(format!("directory path may not contain ..: {value}").into());
+            }
+            std::path::Component::CurDir => {}
+            component => normalized.push(component.as_os_str()),
+        }
+    }
+    Ok(normalized)
+}
+
+fn discover_under_config(
     directory: &Path,
-    home: &Path,
+    max_depth: &usize,
     depth: usize,
+    excludes: &std::collections::HashSet<PathBuf>,
     results: &mut Vec<PathBuf>,
-    seen: &mut std::collections::HashSet<String>,
+    seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
+    if depth >= *max_depth {
+        return Ok(());
+    }
     for entry in fs::read_dir(directory)? {
         let entry = entry?;
         let path = entry.path();
         let metadata = fs::symlink_metadata(&path)?;
         let is_symlink = metadata.file_type().is_symlink();
-        let is_directory = metadata.is_dir();
+        let is_directory = if is_symlink {
+            match fs::metadata(&path) {
+                Ok(target) => target.is_dir(),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            }
+        } else {
+            metadata.is_dir()
+        };
         let next_depth = depth + 1;
-        if (is_directory || is_symlink) && next_depth <= 3 {
-            if seen.insert(path.to_string_lossy().into_owned()) {
-                results.push(path.clone());
-            }
-            let development_root = home.join("devel");
-            let excluded = ["Archive", ".sync", ".SynologyWorkingDirectory"]
-                .iter()
-                .any(|name| path == development_root.join(name));
-            if excluded {
-                results.retain(|candidate| candidate != &path);
-                seen.remove(&path.to_string_lossy().into_owned());
-            } else if is_directory && !is_symlink && next_depth < 3 {
-                discover_under(&path, home, next_depth, results, seen)?;
-            }
+        if is_symlink && !is_directory {
+            continue;
+        }
+        if !(is_directory || is_symlink) || next_depth > *max_depth || excludes.contains(&path) {
+            continue;
+        }
+        if seen.insert(path.clone()) {
+            results.push(path.clone());
+        }
+        if is_directory && !is_symlink {
+            discover_under_config(&path, max_depth, next_depth, excludes, results, seen)?;
         }
     }
     Ok(())
