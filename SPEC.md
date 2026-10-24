@@ -12,11 +12,11 @@ This document describes the independent Herdr Sessionizer plugin: its picker, ne
 
 Provide a terminal picker with open workspaces first, nested agent rows under their parent workspaces, and unopened directory candidates below a separator. Preserve workspace recency ordering. Selecting a workspace focuses it; selecting an agent focuses its captured tab and then pane; selecting an unopened directory creates and focuses a workspace.
 
-Display every reported agent in the snapshot, including `working`, `done`, `idle`, `blocked`, `unknown`, and unexpected statuses. Render `working` yellow, `done` green, `blocked` red, `idle` with the terminal default color, and `unknown` or unexpected statuses grey. Keep status text readable in addition to color.
+Display every reported agent in the snapshot, including `working`, `done`, `idle`, `blocked`, `unknown`, and unexpected statuses. Render `working` yellow, `done` green, `blocked` red, `idle` with the terminal default color, and `unknown` or unexpected statuses grey. Keep status text beside a status icon, using either the configured plain-symbol set or Nerd Font icons, with the same status colors.
 
 Search retains workspace rows. A matching workspace shows all of its agents; a nonmatching workspace shows only agents whose names or types match. The first matching row in display order is selected. Agent-selection failures remain visible and retryable in the open picker.
 
-Read directory candidates from an executable-relative `directories.toml` when present. Ship the current choices, preserve built-in fallback choices when the file is absent, validate the schema and paths strictly, and keep configuration or discovery errors in an error-only picker view until dismissal. The directory configuration affects `pick` only; tracking, jump-back, and pane-exit recovery remain independent.
+Read directory settings and status-icon settings from a single executable-relative `config.toml`. Do not read or merge the old `directories.toml`. Ship the directory choices, preserve built-in defaults when `config.toml` is absent, validate settings strictly, and keep configuration or discovery errors in an error-only picker view until dismissal. Configuration affects `pick` only; tracking, jump-back, and pane-exit recovery remain independent.
 
 Maintain persistent, unique workspace visit history through plugin startup, workspace-focus, and pane-exit hooks. Exclude the reserved pool workspace. When shell exit closes a workspace and Herdr falls back to the pool, restore a surviving user workspace. A separate jump-back command toggles between the two most recently visited workspaces that remain open.
 
@@ -57,6 +57,10 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 33. As a user, I want both the original and display errors reported if the error view cannot open, so that a UI failure does not hide the cause.
 34. As a maintainer, I want tests for the approved search, invalid-configuration, missing-metadata, and filesystem-error cases, so that passing tests substantiate those requirements.
 
+35. As a terminal user, I want directory and status-icon settings in one plugin-local configuration file, so that I maintain only one settings file.
+36. As a terminal user, I want plain status symbols by default and an explicit Nerd Font option, so that icons do not depend on unreliable font detection.
+37. As a terminal user, I want status text and existing colors preserved beside either icon set, so that the state remains understandable.
+
 ## Implementation Decisions
 
 ### Plugin boundary and runtime
@@ -75,14 +79,15 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 - Missing IDs are validation errors before any focus operation. Stale targets and focus failures are visible in the still-open picker and can be retried with the same snapshot or dismissed. The picker pane and temporary files still clean up on exit.
 - A successful workspace or agent selection refreshes history before printing the resolved absolute directory. Agent status styling and labels never contaminate that output.
 
-### Directory configuration and discovery
+### Unified configuration and directory discovery
 
-- The picker reads `directories.toml` beside the running executable on every invocation, independent of the caller's working directory. There is no alternate path or environment override.
-- The schema has optional top-level `roots`, `include`, and `exclude` lists. Each root has exactly `path` and positive integer `depth`. Unknown keys, invalid types, zero depth, relative paths, and paths containing `..` are errors.
+- The picker reads only `config.toml` beside the running executable on every invocation, independent of the caller's working directory. There is no alternate path or environment override. This plugin-local file is distinct from the caller-owned Herdr configuration in the parent directory.
+- Do not read, merge, or fall back to `directories.toml`, even when it exists and `config.toml` is absent. Existing directory settings must be moved into `config.toml`; no automatic migration is required by the confirmed scope.
+- The schema has optional top-level `roots`, `include`, and `exclude` lists, plus optional `status_icons` accepting exactly `"plain"` or `"nerd"`. Omitted `status_icons` defaults to `"plain"`, including in a present empty file. Reject other values and types as configuration errors. Each root has exactly `path` and positive integer `depth`. Unknown keys, invalid types, zero depth, relative paths, and paths containing `..` are errors.
 - Paths may be absolute or use `~/`. Normalize redundant separators, dot components, and trailing separators without resolving symlinks. Reject duplicate normalized roots, including duplicates with different depths.
-- A present file replaces built-in choices completely. Omitted lists and an empty file mean no discovered or explicitly included candidates. Only a missing file activates built-in fallback choices.
+- A present file replaces built-in directory choices completely. Omitted directory lists and an empty file mean no discovered or explicitly included candidates; adding only `status_icons` does not restore directory defaults. Only a missing `config.toml` activates built-in directory defaults and plain icons. Invalid or unreadable configuration is an error, never a reason to fall back.
 - The confirmed initial configuration and built-in fallback use depth 3 for both roots. The currently checked-in editable file has since set `~/devel` to depth 4; that local configuration value does not change the confirmed default contract.
-- The shipped `directories.toml` currently includes `~/dotfiles`, `~/Notes`, `~/Downloads`, `~/Work`, `~/devel`, and `~/Mail`; excludes `~/devel/Archive`, `~/devel/.sync`, and `~/devel/.SynologyWorkingDirectory`; discovers `~/VAULT` at depth 3 and `~/devel` at depth 4. Roots are processed in file order, followed by includes in list order. The first normalized candidate occurrence wins. Depth one means immediate children, not the root itself.
+- The unified configuration must retain the directory settings when replacing the shipped directory-only file. Before this change, the checked-in `directories.toml` includes `~/dotfiles`, `~/Notes`, `~/Downloads`, `~/Work`, `~/devel`, and `~/Mail`; excludes `~/devel/Archive`, `~/devel/.sync`, and `~/devel/.SynologyWorkingDirectory`; discovers `~/VAULT` at depth 3 and `~/devel` at depth 4. Roots are processed in file order, followed by includes in list order. The first normalized candidate occurrence wins. Depth one means immediate children, not the root itself.
 - Exclusions are exact normalized paths. An excluded root is skipped before access; an excluded discovered directory prunes its subtree. Explicit includes are processed independently and may re-add excluded or unavailable paths. Explicit includes are not existence-checked during loading and retain selection-time access behavior.
 - Discovered symlinks are offered only when their targets are existing directories and are never traversed. Broken links and links to files are omitted. Other target-check errors are discovery errors. This applies to configured roots and built-in fallback discovery, but not to explicit includes.
 - Missing or unreadable roots and other discovery failures stop normal candidate construction. The picker shows an error-only view until dismissal. It must not fall back to defaults, navigate, create a workspace, or affect `track`, `jump-back`, or `after-pane-exit`.
@@ -94,6 +99,13 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 - Clean up temporary resources and attempt to close only the explicitly identified temporary picker pane under the existing ownership rules. Do not navigate or create anything as an error-handling action. Closing a caller-owned popup does not promise restoration of its previous focus.
 - If fzf cannot open the error view, report both the original failure and display failure on stderr, clean up, and return failure with empty stdout. Do not fall back or continue normal selection. Persistent visual display cannot be guaranteed when the display itself fails.
 - These rules apply only to configuration/discovery failures. Agent-selection errors retain their separate retryable flow, allowing another selection against the captured snapshot.
+
+### Status icons
+
+- `status_icons = "plain"` uses `▶` for `working`, `✓` for `done`, `○` for `idle`, `!` for `blocked`, and `?` for `unknown`. Missing status is displayed as `unknown`; unexpected status text stays unchanged and uses the unknown icon.
+- Apply the existing status colors to the icons and their adjacent status text: working yellow, done green, idle terminal-default, blocked red, unknown/unexpected grey. Keep Herdr's status text unchanged; icons do not replace the labels.
+- `status_icons = "nerd"` explicitly enables Nerd Font icons. Do not detect installed fonts or terminal glyph support automatically, and do not silently switch sets based on detection. The user must configure a compatible terminal font. Use `` (`U+F04B`) for `working`, `` (`U+F00C`) for `done`, `` (`U+F04C`) for `idle`, and `` (`U+F056`, minus-circle/no-entry shape) for `blocked`. Use plain `?` (`U+003F`) for `unknown`, missing statuses, and unexpected statuses in both modes. Do not use emoji.
+- Icons do not request a larger per-character font size; appearance depends on the terminal font. Preserve the picker selection identities and directory-output contract regardless of icon set.
 
 ### Picker ordering, display, and search
 
@@ -124,6 +136,13 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 - The freshly rerun `tests/live_workspace_exit.py` verified isolated Ctrl+d recovery with the real manifest and Herdr server. It does not prove the full picker-to-warm-workspace flow.
 - The freshly rerun `tests/live_config_error.py` passed configuration and discovery error visibility, Escape/Ctrl+C/Enter dismissal, nonzero status, separate stdout/stderr checks, owned-pane cleanup, and failing-fzf error propagation. All three Python live scripts passed on the macOS host with bounded waits. These results establish tested scenarios on this platform, not universal terminal/platform coverage.
 
+### Required coverage for unified configuration and icons
+
+- Verify executable-relative `config.toml` lookup, rereading, strict values/types, absent-file defaults, empty/present-file directory replacement, and independent omission defaults for `status_icons`.
+- Verify the old `directories.toml` is ignored, including when it is the only file present or conflicts with `config.toml`. Invalid `config.toml` must not activate old-file or built-in fallback.
+- Assert the exact plain symbols, unchanged status text, and required colors for every status, including missing/unexpected status behavior. Assert the agreed Nerd Font code points, plain question mark in both modes, absence of emoji, and coloring of both icon and adjacent status text.
+- Preserve all discovery, search, navigation, history, error-dismissal and output regressions. Existing passing evidence below predates unified configuration and icons; it does not establish these new requirements.
+
 ### Acceptance coverage from issue #11
 
 - Keep the existing compiled-executable boundary with temporary home/state/deployment directories. Use stub Herdr calls for observable actions and real fzf in isolated PTYs for terminal behavior. No new internal parser test interface is required.
@@ -149,6 +168,8 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 - Product implementation or expanded tests as part of maintaining this document.
 
 ## Further Notes
+
+- Unified `config.toml` and configurable status icons are confirmed requirements, not yet implemented or tested. They supersede earlier directory-only filename requirements in issue #6 and the historical coverage map. The exact Nerd Font glyphs and coloring of both icons and adjacent status text are confirmed above. This document update does not authorize implementation.
 
 - GitHub issues #1 through #11 are closed. Directory-configuration completion and the coverage/dismissal follow-up were verified and merged into `main`. Issue closure and merging do not establish deployment or exhaustive test coverage; use actual assertions and recorded runs as evidence.
 - Issue #11 supplies the latest confirmed coverage and configuration/discovery dismissal requirements. Its dismissal contract takes precedence over earlier unspecified key/output/status behavior; it does not change retryable agent-selection errors.
