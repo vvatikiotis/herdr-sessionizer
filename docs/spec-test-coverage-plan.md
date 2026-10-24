@@ -1,5 +1,7 @@
 # Full specification-to-test coverage plan
 
+> Historical planning artifact: the checklist below records the intended audit sequence and is not a current task list or execution report. Completion evidence and remaining limitations are recorded in `docs/spec-test-coverage-map.md`; do not infer completion or current status from the plan alone.
+
 ## Goal and limits
 
 Map every normative requirement in SPEC.md to observable assertions. Add missing coverage at the highest existing boundary. This is a plan, not authorization to implement. Do not add new requirements, speculative abstractions, or style-only refactoring.
@@ -24,7 +26,7 @@ Use the compiled binary, temporary deployment/home/state, and controlled Herdr/f
 - Workspace ordering: one scenario includes previous, current, older visited, and unvisited workspaces, with nested agents and pool exclusion.
 - Directory identity: assert a usable foreground_cwd when cwd is absent/null and the first-pane fallback rule. Assert selection-time access failure for an unavailable explicit include and no creation/focus on that failure.
 - Snapshot stability: change the stub's later agent metadata and verify retries still use captured IDs rather than retargeting or refreshing.
-- Defaults: deep fixture distinguishes built-in depth three from the checked-in editable depth four, without treating the editable value as the default contract.
+- Defaults: deep fixture distinguishes built-in depth three from the checked-in editable depth four, without treating the editable value as the default contract. (Completed in the recorded audit; see the coverage map.)
 - Pane-exit: verify the specified pool-only/no-surviving-user no-creation case, still-existing source workspace, existing user focus preservation, and target selection. Add event-validation/timeout/focus-failure checks only where the current spec explicitly requires that behavior; do not invent an error contract from source branches.
 - Error-view launch failure: strengthen explicit owned-pane closure, no-navigation/creation, and temporary-resource assertions where missing.
 - Add remaining schema/path/symlink cases only when the requirement map finds no suitable assertion.
@@ -55,7 +57,7 @@ Deliverable: bounded, repeatable real-fzf regressions with rendered/accepted ide
 
 ## 5. Filesystem/platform limitations
 
-- Attempt unreadable-root and permission-denied target fixtures under a non-privileged test identity where supported.
+- Attempt unreadable-root and permission-denied target fixtures under a non-privileged test identity where supported. (The recorded macOS audit tested unreadable roots; permission-denied symlink-target behavior was unsupported on that host.)
 - Confirm the fixture truly denies access before accepting the test result. If it does not, report a named limitation with reason.
 - Keep deterministic symlink-loop/non-NotFound coverage separate from permission-specific evidence.
 - Record supported host/Herdr/fzf versions and avoid implying Linux coverage from macOS runs. Do not introduce privileged environment changes merely to obtain green tests.

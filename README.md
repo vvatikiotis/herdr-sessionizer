@@ -18,7 +18,7 @@ if [ ! -e "$PLUGIN_DIR/config.toml" ]; then
 fi
 ```
 
-To move existing settings, merge the contents of `directories.toml` into `config.toml` manually. The install step above preserves an existing `config.toml`; the plugin does not migrate or merge legacy files.
+When upgrading from the former `directories.toml` layout, manually transfer its settings into `config.toml`. The plugin reads only `config.toml`; it never reads or merges `directories.toml`, and it does not automatically migrate settings. The install step above preserves an existing `config.toml`.
 
 Relink after changing the manifest so Herdr reads its current event hooks:
 
@@ -54,7 +54,9 @@ path = "~/devel"
 depth = 4
 ```
 
-`roots` entries require an absolute or `~/` path and a positive `depth`. Optional `status_icons` accepts `"plain"` or `"nerd"`; it defaults to `"plain"`. Plain symbols are the default. Nerd mode uses the configured Nerd Font glyphs and requires a compatible terminal font. Depth one means immediate children of the root, not the root itself. Discovery processes roots in file order, then `include` entries in list order. Paths are normalized without resolving symlinks, and duplicate normalized roots are rejected. A present file replaces the built-in choices completely: omitted lists and an empty file mean no discovered or explicitly included paths. Built-in choices are used only when the file is absent.
+`roots` entries require an absolute or `~/` path and a positive `depth`. Optional `status_icons` accepts exactly `"plain"` or `"nerd"`; it defaults to `"plain"` independently of the directory lists. Plain symbols are the default. They are `▶` (working), `✓` (done), `○` (idle), `!` (blocked), and `?` (unknown). Nerd mode uses `` (working), `` (done), `` (idle), and `` (blocked), with plain `?` for unknown, missing, and unexpected statuses. Both the icon and adjacent status text use the status color: working yellow, done green, idle terminal-default, blocked red, unknown/unexpected grey. Status text is unchanged. Nerd mode does not detect fonts or switch icon sets automatically; configure a compatible terminal font. No emojis are used, and icons do not request a larger per-character font size.
+
+Depth one means immediate children of the root, not the root itself. Discovery processes roots in file order, then `include` entries in list order. Paths are normalized without resolving symlinks, and duplicate normalized roots are rejected. A present file replaces the built-in choices completely: omitted lists and an empty file mean no discovered or explicitly included paths. Built-in directory choices are used only when `config.toml` is absent.
 
 `exclude` entries are exact normalized paths. An excluded root is skipped before it is accessed, and an excluded discovered directory prunes its subtree. Explicit `include` entries are processed independently and can re-add an excluded or unavailable path; they are not checked until selection. Discovered symlinks are offered only when they point to existing directories, and are never traversed. Broken links and links to files are omitted. Other discovery errors, including unreadable roots or symlink targets, are shown in the picker.
 
@@ -83,8 +85,8 @@ python3 tests/live_picker.py
 python3 tests/live_config_error.py
 ```
 
-The live Herdr regressions start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, focus moving to the expected workspace and agent pane across a created tab, paths containing spaces, and picker recovery after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
+The live Herdr regressions start and stop only named temporary servers with isolated HOME, configuration, state, socket, and plugin paths. They never attach to or modify the default session. Current recorded verification passed all three live scripts; `live_picker.py` passed twice consecutively after waiting for the exact directory target to be ready before acceptance. `live_workspace_exit.py` verifies Ctrl+d focus recovery. `live_picker.py` uses real fzf in a PTY and verifies search-driven nested-agent selection, ANSI output, focus moving to the expected workspace and agent pane across a created tab, paths containing spaces, and picker recovery after an injected agent-focus failure. The picker test also records and checks the live agent metadata shape, accepting `display_name`/`name` and `agent`/`type` variants.
 
 The interactive checks are intended for Herdr 0.9.5, fzf 0.74.5, and macOS. The failure case injects a deterministic `agent focus` failure through an isolated wrapper so it does not depend on timing or destroy the disposable agent. In this isolated scenario, it checks that fzf displays the error and that selecting a workspace row recovers; the Rust stub tests cover stale/missing IDs and dismissal. `live_config_error.py` uses real fzf with stub Herdr and an isolated executable deployment to verify configuration-error visibility, normal dismissal, pane cleanup, and temporary-file cleanup. It uses `pty.fork` so the child receives a controlling terminal and fails if dismissal or cleanup cannot be verified. Linux and other Herdr/fzf versions remain unverified.
 
-The original Bash scripts and Python tests are retained under `legacy/` for reference. The plugin and current test suite do not use them.
+The original Bash scripts and Python tests are retained under `legacy/` as historical references. The plugin and current test suite do not use them. The former `directories.toml` layout is likewise historical: only the plugin-local `config.toml` is read.
