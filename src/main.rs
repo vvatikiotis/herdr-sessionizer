@@ -58,7 +58,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
-    let available = match discover_directories(&home) {
+    let (available, status_icons) = match discover_directories(&home) {
         Ok(available) => available,
         Err(error) => {
             let error = format!("Directory discovery failed: {error}");
@@ -159,7 +159,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
             workspace.id,
             workspace.display
         ));
-        let mut rows = agent_rows(workspace, agent_list);
+        let mut rows = agent_rows(workspace, agent_list, status_icons);
         disambiguate_agent_labels(&mut rows);
         open_rows.extend(rows.into_iter().map(|row| {
             format!(
@@ -337,9 +337,16 @@ struct LoadedDirectoryConfig {
     roots: Vec<(PathBuf, usize)>,
     includes: Vec<PathBuf>,
     excludes: std::collections::HashSet<PathBuf>,
+    status_icons: StatusIcons,
 }
 
-fn discover_directories(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+#[derive(Clone, Copy)]
+enum StatusIcons {
+    Plain,
+    Nerd,
+}
+
+fn discover_directories(home: &Path) -> Result<(Vec<PathBuf>, StatusIcons), Box<dyn Error>> {
     let config = load_directory_config(home)?;
     let mut directories = Vec::new();
     let mut seen = std::collections::HashSet::new();
@@ -361,7 +368,7 @@ fn discover_directories(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
             directories.push(path);
         }
     }
-    Ok(directories)
+    Ok((directories, config.status_icons))
 }
 
 fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn Error>> {
@@ -451,6 +458,11 @@ fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn E
         roots,
         includes,
         excludes,
+        status_icons: match config.status_icons.as_deref() {
+            Some("nerd") => StatusIcons::Nerd,
+            Some("plain") | None => StatusIcons::Plain,
+            Some(_) => unreachable!("status_icons validated above"),
+        },
     })
 }
 
@@ -551,7 +563,7 @@ fn abbreviate_home(path: &str, home: &Path) -> String {
         .unwrap_or_else(|| path.to_owned())
 }
 
-fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
+fn agent_rows(workspace: &OpenWorkspace, agents: &[Value], icons: StatusIcons) -> Vec<AgentRow> {
     agents
         .iter()
         .filter(|agent| {
@@ -581,14 +593,38 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value]) -> Vec<AgentRow> {
                 .get("agent_status")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
-            let color = match status {
-                "working" => "33",
-                "done" => "32",
-                "blocked" => "31",
-                "idle" => "39",
-                _ => "90",
+            let (icon, color) = match status {
+                "working" => (
+                    match icons {
+                        StatusIcons::Plain => "▶",
+                        StatusIcons::Nerd => "\u{f04b}",
+                    },
+                    "33",
+                ),
+                "done" => (
+                    match icons {
+                        StatusIcons::Plain => "✓",
+                        StatusIcons::Nerd => "\u{f00c}",
+                    },
+                    "32",
+                ),
+                "idle" => (
+                    match icons {
+                        StatusIcons::Plain => "○",
+                        StatusIcons::Nerd => "\u{f04c}",
+                    },
+                    "39",
+                ),
+                "blocked" => (
+                    match icons {
+                        StatusIcons::Plain => "!",
+                        StatusIcons::Nerd => "\u{f056}",
+                    },
+                    "31",
+                ),
+                _ => ("?", "90"),
             };
-            let status = format!("\x1b[{color}m[{status}]\x1b[0m");
+            let status = format!("\x1b[{color}m{icon} [{status}]\x1b[0m");
             label.push(' ');
             label.push_str(&status);
             let search = match (display_name, agent_type) {

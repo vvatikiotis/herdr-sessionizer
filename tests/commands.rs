@@ -1102,18 +1102,12 @@ sed -n '2p' "$FIXTURE/candidates"
     let candidates = fs::read_to_string(root.join("candidates")).unwrap();
     assert!(candidates.contains("review (codex)"));
     assert!(candidates.contains("schema-name (hermes)"));
-    assert!(candidates.contains("[working]"));
-    assert!(candidates.contains("[blocked]"));
-    assert!(candidates.contains("[idle]"));
-    assert!(candidates.contains("[done]"));
-    assert!(candidates.contains("[paused]"));
-    assert!(candidates.contains("[unknown]"));
-    assert!(candidates.contains("\u{1b}[33m[working]"));
-    assert!(candidates.contains("\u{1b}[31m[blocked]"));
-    assert!(candidates.contains("\u{1b}[39m[idle]"));
-    assert!(candidates.contains("\u{1b}[32m[done]"));
-    assert!(candidates.contains("\u{1b}[90m[paused]"));
-    assert!(candidates.contains("\u{1b}[90m[unknown]"));
+    assert!(candidates.contains("\u{1b}[33m▶ [working]\u{1b}[0m"));
+    assert!(candidates.contains("\u{1b}[31m! [blocked]\u{1b}[0m"));
+    assert!(candidates.contains("\u{1b}[39m○ [idle]\u{1b}[0m"));
+    assert!(candidates.contains("\u{1b}[32m✓ [done]\u{1b}[0m"));
+    assert!(candidates.contains("\u{1b}[90m? [paused]\u{1b}[0m"));
+    assert!(candidates.contains("\u{1b}[90m? [unknown]\u{1b}[0m"));
     for pane_id in ["wA:p1", "wA:p2"] {
         assert!(candidates.lines().any(|line| {
             line.split('\t')
@@ -1613,7 +1607,7 @@ sed -n '2p' "$FIXTURE/candidates-$count"
         "1\n"
     );
     let expected_row = format!(
-        "{}\t  ↳ review (codex) \u{1b}[33m[working]\u{1b}[0m\tagent|wA|captured-tab|captured-pane\treview codex",
+        "{}\t  ↳ review (codex) \u{1b}[33m▶ [working]\u{1b}[0m\tagent|wA|captured-tab|captured-pane\treview codex",
         home.join("VAULT/project").display()
     );
     for candidate_file in ["candidates-1", "candidates-2"] {

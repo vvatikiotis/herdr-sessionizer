@@ -169,7 +169,7 @@ Maintain persistent, unique workspace visit history through plugin startup, work
 
 ## Further Notes
 
-- Issue #18 implements unified executable-relative `config.toml` for directory settings and strict `status_icons` values (`plain` or `nerd`). Tests cover config rereading, missing-file defaults, present-file replacement, ignored legacy files (including conflict and invalid-new-file cases), and the shipped editable choices. Status icon rendering and its symbol/color assertions remain for blocked issue #19; do not infer their completion from configuration validation.
+- Issue #18 implements unified executable-relative `config.toml` for directory settings and strict `status_icons` values (`plain` or `nerd`). Tests cover config rereading, missing-file defaults, present-file replacement, ignored legacy files (including conflict and invalid-new-file cases), and the shipped editable choices. Issue #19 implements adjacent status glyphs and unchanged status text, with matching colors. Exact executable-boundary checks cover plain glyphs and unknown/missing cases; Nerd glyph and real-fzf evidence are recorded in `docs/spec-test-coverage-map.md` after execution.
 
 - GitHub issues #1 through #11 are closed. Directory-configuration completion and the coverage/dismissal follow-up were verified and merged into `main`. Issue closure and merging do not establish deployment or exhaustive test coverage; use actual assertions and recorded runs as evidence.
 - Issue #11 supplies the latest confirmed coverage and configuration/discovery dismissal requirements. Its dismissal contract takes precedence over earlier unspecified key/output/status behavior; it does not change retryable agent-selection errors.

@@ -11,6 +11,7 @@ This is an audit artifact only. It does not change the product or `SPEC.md`.
 - **Fresh live pass** means the isolated script passed during this audit on the current macOS host. Historical references in the table are retained only where the test name or prior evidence is being described.
 - **Static manifest** means direct inspection of `herdr-plugin.toml`; it is not evidence that Herdr delivered the registered event.
 - Status is `covered`, `partial`, `missing`, or `environment-limited`. A historical pass is not treated as a current rerun.
+- Issue #19 implementation evidence: executable-boundary assertions in `picker_selects_nested_agent_by_captured_tab_and_pane_ids` now check every plain glyph, adjacent unchanged status label, and ANSI color, including missing and unexpected statuses. Fresh `tests/live_picker.py` verifies the plain icon/status ANSI output through real fzf as part of its picker regression. Nerd Font codepoints are implemented, but no executable-boundary or live-fzf Nerd-mode assertion has been added; that acceptance evidence remains partial.
 
 ## Traceability map
 
@@ -94,7 +95,7 @@ This is an audit artifact only. It does not change the product or `SPEC.md`.
 ## Issue #18 unified-configuration evidence
 
 - `tests/directory_config.rs` now exercises executable-relative `config.toml`, rereading, empty/present replacement, missing-file fallback, legacy-only ignored, legacy/config conflict, and invalid `config.toml` without fallback. Existing strict directory schema, path, ordering, depth, exclusion, and symlink tests now use `config.toml`.
-- `status_icons` accepts only `plain` or `nerd` in the unified schema. Icon rendering remains unimplemented here, pending issue #19.
+- `status_icons` accepts only `plain` or `nerd` in the unified schema. Issue #19 implements both icon sets and preserves status labels/colors; plain glyphs have direct executable-boundary assertions. Nerd glyph rendering still lacks direct executable-boundary assertions.
 - The shipped `config.toml` retains the editable directory values from `directories.toml`, including `~/devel` depth 4. Built-in defaults remain depth 3.
 - This worktree is based on the integrated tip `19da1eb`; it was already at the integration tip before implementation.
 
