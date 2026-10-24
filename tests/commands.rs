@@ -1411,6 +1411,7 @@ esac
         .unwrap();
     assert!(agent_display.starts_with("  ↳ Agent "));
     assert!(!agent_display.contains("p1"));
+    assert!(arguments.contains("--border-label= Select directory to create a workspace "));
     assert!(arguments.contains("Hidden workspaces (directory unavailable): missing"));
 }
 

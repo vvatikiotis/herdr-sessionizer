@@ -795,7 +795,7 @@ awk -F'\t' '
             "--raw",
             "--info=inline",
             "--border=rounded",
-            "--border-label= Select Herdr workspace directory ",
+            "--border-label= Select directory to create a workspace ",
         ])
         .args(header.into_iter().flat_map(|header| ["--header", header]))
         .stdin(Stdio::piped())

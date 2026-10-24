@@ -10,7 +10,7 @@ This document describes the independent Herdr Sessionizer plugin: its picker, ne
 
 ## Solution
 
-Provide a terminal picker with open workspaces first, nested agent rows under their parent workspaces, and unopened directory candidates below a separator. Preserve workspace recency ordering. Selecting a workspace focuses it; selecting an agent focuses its captured tab and then pane; selecting an unopened directory creates and focuses a workspace.
+Provide a terminal picker with open workspaces first, nested agent rows under their parent workspaces, and unopened directory candidates below a separator. Label the picker border exactly `Select directory to create a workspace`. Preserve workspace recency ordering. Selecting a workspace focuses it; selecting an agent focuses its captured tab and then pane; selecting an unopened directory creates and focuses a workspace.
 
 Display every reported agent in the snapshot, including `working`, `done`, `idle`, `blocked`, `unknown`, and unexpected statuses. Render `working` yellow, `done` green, `blocked` red, `idle` with the terminal default color, and `unknown` or unexpected statuses grey. Keep status text beside a status icon, using either the configured plain-symbol set or Nerd Font icons, with the same status colors.
 
