@@ -42,6 +42,7 @@ The shell-pool tool is optional. Without it, the picker, ordinary workspace crea
 Edit the plugin-local `config.toml` to choose directories. This file is read beside the executable each time the picker opens, and a present file replaces the built-in directory choices:
 
 ```toml
+status_icons = "plain" # or "nerd"
 include = ["~/dotfiles", "~/Notes", "~/Downloads", "~/Work", "~/devel"]
 exclude = ["~/devel/Archive"]
 
@@ -52,8 +53,6 @@ depth = 3
 [[roots]]
 path = "~/devel"
 depth = 4
-
-status_icons = "plain" # or "nerd"
 ```
 
 Root paths must be absolute or start with `~/`, and depth must be positive. Depth 1 means immediate child directories. `include` paths are added directly; `exclude` paths are omitted from discovery. The default status style is `plain`; `nerd` requires a compatible terminal font and is not selected automatically.
