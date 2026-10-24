@@ -491,6 +491,16 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             if f"[{status}]".encode() not in screen:
                 raise AssertionError(f"real fzf transcript omitted status text [{status}]: {screen[-3000:]!r}")
 
+            # Explicit Nerd mode must render the configured codepoint and keep
+            # the status label visible through real fzf.
+            (plugin / "config.toml").write_text('status_icons = "nerd"\n')
+            nerd_code, nerd_screen = run_picker(b"\x1b", wait_for_text=str(search_term).encode())
+            (plugin / "config.toml").unlink()
+            expected_nerd = {"working": "\uf04b", "done": "\uf00c", "idle": "\uf04c", "blocked": "\uf056"}
+            icon = expected_nerd.get(status, "?")
+            if nerd_code != 0 or icon.encode() not in nerd_screen or f"[{status}]".encode() not in nerd_screen:
+                raise AssertionError(f"Nerd mode omitted expected icon/status {icon!r} [{status}]: {nerd_screen[-3000:]!r}")
+
             # Keep the picker snapshot while making its captured pane stale.
             listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
             listener.bind(("127.0.0.1", 0))
