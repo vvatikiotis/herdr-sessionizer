@@ -1,4 +1,5 @@
 /target/
+/config.toml
 /herdr-sessionizer
 /legacy/
 /tests/__pycache__/

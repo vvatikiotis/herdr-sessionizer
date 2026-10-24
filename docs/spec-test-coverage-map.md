@@ -96,7 +96,7 @@ This is an audit artifact only. It does not change the product or `SPEC.md`.
 
 - `tests/directory_config.rs` now exercises executable-relative `config.toml`, rereading, empty/present replacement, missing-file fallback, legacy-only ignored, legacy/config conflict, and invalid `config.toml` without fallback. Existing strict directory schema, path, ordering, depth, exclusion, and symlink tests now use `config.toml`.
 - `status_icons` accepts only `plain` or `nerd` in the unified schema. Issue #19 implements both icon sets and preserves status labels/colors. Both modes have exact executable-boundary assertions for every status, plus default/type tests. Real-fzf Nerd rendering and selection are separately verified for the live fixture's reported status; this does not claim all status/color combinations were each rendered in a terminal.
-- The shipped `config.toml` retains the editable values from the historical `directories.toml` layout, including `~/devel` depth 4. Built-in defaults remain depth 3. The old file is not read.
+- The tracked `config.example.toml` contains generic illustrative paths and exercises all supported directives; it does not preserve or claim to represent local choices. The personal `config.toml` is ignored by Git and loaded only at runtime. Built-in defaults remain depth 3. The old file is not read.
 - This audit's provenance and prior integration-tip note refer to its historical base (`19da1eb`); this current checkout is `e82637c` on `feat/unified-config-status-icons`. It is not evidence of merge, push, or deployment.
 
 ## Remaining approved slices

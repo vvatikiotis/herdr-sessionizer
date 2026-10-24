@@ -1,0 +1,23 @@
+# Status icons: "plain" (default) or "nerd" (requires a compatible Nerd Font).
+status_icons = "plain"
+
+# Explicit directories added directly to the picker.
+include = [
+  "~/Projects/client-apps",
+  "~/Sandbox",
+  "~/Documents/example-notes",
+]
+
+# Exact paths omitted from discovery.
+exclude = [
+  "~/Projects/client-apps/retired",
+]
+
+# Discover child directories up to the specified positive depth.
+[[roots]]
+path = "~/Projects/client-apps"
+depth = 3
+
+[[roots]]
+path = "~/Sandbox"
+depth = 4

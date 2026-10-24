@@ -18,7 +18,7 @@ Keep `config.toml` beside the binary. For a separate plugin directory, install t
 ```sh
 install -m 755 target/release/herdr-sessionizer "$PLUGIN_DIR/herdr-sessionizer"
 if [ ! -e "$PLUGIN_DIR/config.toml" ]; then
-  install -m 644 config.toml "$PLUGIN_DIR/config.toml"
+  install -m 644 config.example.toml "$PLUGIN_DIR/config.toml"
 fi
 ```
 
@@ -39,19 +39,19 @@ The shell-pool tool is optional. Without it, the picker, ordinary workspace crea
 
 ## Directory and status settings
 
-Edit the plugin-local `config.toml` to choose directories. This file is read beside the executable each time the picker opens, and a present file replaces the built-in directory choices:
+Copy `config.example.toml` to `config.toml` beside the executable, then edit the copy to choose directories. The example documents every supported setting; it is not read at runtime. The personal `config.toml` is ignored by Git. The runtime file replaces the built-in directory choices:
 
 ```toml
 status_icons = "plain" # or "nerd"
-include = ["~/dotfiles", "~/Notes", "~/Downloads", "~/Work", "~/devel"]
-exclude = ["~/devel/Archive"]
+include = ["~/Projects/client-apps", "~/Sandbox", "~/Documents/example-notes"]
+exclude = ["~/Projects/client-apps/retired"]
 
 [[roots]]
-path = "~/VAULT"
+path = "~/Projects/client-apps"
 depth = 3
 
 [[roots]]
-path = "~/devel"
+path = "~/Sandbox"
 depth = 4
 ```
 

@@ -666,26 +666,30 @@ case "$1 $2" in
 }
 
 #[test]
-fn shipped_configuration_matches_missing_file_defaults() {
+fn example_configuration_is_complete_and_accepted() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
+    fs::create_dir_all(home.join("Projects/client-apps/retired")).unwrap();
+    fs::create_dir_all(home.join("Sandbox")).unwrap();
+    fs::create_dir_all(home.join("Documents/example-notes")).unwrap();
 
-    let without_file = run_pick(&home, &bin, root);
-    assert!(without_file.status.success());
-    let defaults = fs::read_to_string(root.join("candidates")).unwrap();
-    fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml"),
-        bin.join("config.toml"),
-    )
-    .unwrap();
+    let example_path = Path::new(env!("CARGO_MANIFEST_DIR")).join("config.example.toml");
+    let example = fs::read_to_string(&example_path).unwrap();
+    for directive in [
+        "status_icons = \"plain\"",
+        "include = [",
+        "exclude = [",
+        "path = \"~/Projects/client-apps\"\ndepth = 3",
+        "path = \"~/Sandbox\"\ndepth = 4",
+        "~/Projects/client-apps/retired",
+    ] {
+        assert!(example.contains(directive), "missing {directive}");
+    }
+    fs::copy(example_path, bin.join("config.toml")).unwrap();
     let with_file = run_pick(&home, &bin, root);
     assert!(with_file.status.success());
-    assert_eq!(
-        defaults,
-        fs::read_to_string(root.join("candidates")).unwrap()
-    );
 }
 
 #[test]
