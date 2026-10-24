@@ -57,6 +57,121 @@ fn run_pick(home: &Path, bin: &Path, fixture: &Path) -> std::process::Output {
         .unwrap()
 }
 
+fn install_agent_fixture(home: &Path, bin: &Path) {
+    let agents = serde_json::json!({"result": {"agents": [
+        {"workspace_id":"w1", "pane_id":"p0", "agent":"pi", "agent_status":"working"},
+        {"workspace_id":"w1", "pane_id":"p1", "agent":"pi", "agent_status":"done"},
+        {"workspace_id":"w1", "pane_id":"p2", "agent":"pi", "agent_status":"idle"},
+        {"workspace_id":"w1", "pane_id":"p3", "agent":"pi", "agent_status":"blocked"},
+        {"workspace_id":"w1", "pane_id":"p4", "agent":"pi", "agent_status":"unknown"},
+        {"workspace_id":"w1", "pane_id":"p5", "agent":"pi"},
+        {"workspace_id":"w1", "pane_id":"p6", "agent":"pi", "agent_status":"paused"}
+    ]}});
+    fs::write(bin.join("agents.json"), agents.to_string()).unwrap();
+    let panes =
+        serde_json::json!({"result":{"panes":[{"workspace_id":"w1","cwd":home.join("other")} ]}});
+    fs::write(bin.join("panes.json"), panes.to_string()).unwrap();
+    executable(
+        &bin.join("herdr"),
+        r#"#!/bin/sh
+case "$1 $2" in
+  'workspace list') printf '%s\n' '{"result":{"workspaces":[{"workspace_id":"w1","label":"other","focused":true}]}}' ;;
+  'pane list') /bin/cat "$(dirname "$0")/panes.json" ;;
+  'agent list') /bin/cat "$(dirname "$0")/agents.json" ;;
+  'status server') exit 0 ;;
+  *) exit 1 ;;
+esac
+"#,
+    );
+}
+
+#[test]
+fn both_icon_modes_color_exact_symbols_and_status_text() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    install_agent_fixture(&home, &bin);
+    for (mode, icons) in [
+        ("plain", ["▶", "✓", "○", "!", "?", "?", "?"]),
+        (
+            "nerd",
+            [
+                "\u{f04b}", "\u{f00c}", "\u{f04c}", "\u{f056}", "?", "?", "?",
+            ],
+        ),
+    ] {
+        fs::write(
+            bin.join("config.toml"),
+            format!("status_icons = \"{mode}\"\n"),
+        )
+        .unwrap();
+        let output = run_pick(&home, &bin, root);
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+        for (index, (status, color)) in [
+            ("working", Some("33")),
+            ("done", Some("32")),
+            ("idle", None),
+            ("blocked", Some("31")),
+            ("unknown", Some("90")),
+            ("unknown", Some("90")),
+            ("paused", Some("90")),
+        ]
+        .iter()
+        .enumerate()
+        {
+            let row = candidates
+                .lines()
+                .find(|row| row.contains(&format!("agent|w1||p{index}")))
+                .unwrap();
+            let expected = match color {
+                Some(color) => format!("\u{1b}[{color}m{} [{status}]\u{1b}[0m", icons[index]),
+                None => format!("{} [{status}]", icons[index]),
+            };
+            assert!(
+                row.contains(&expected),
+                "{mode}: {row:?}, expected {expected:?}"
+            );
+        }
+        // A setting alone must not restore the built-in unopened directories.
+        assert!(!candidates.contains(&format!("{}\t", home.join("Mail").display())));
+    }
+}
+
+#[test]
+fn icon_defaults_and_invalid_types_are_observable_through_picker() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    install_agent_fixture(&home, &bin);
+    for config in [None, Some(""), Some("include = [\"~/explicit\"]\n")] {
+        match config {
+            Some(contents) => fs::write(bin.join("config.toml"), contents).unwrap(),
+            None => {
+                let _ = fs::remove_file(bin.join("config.toml"));
+            }
+        }
+        let output = run_pick(&home, &bin, root);
+        assert!(output.status.success());
+        let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+        assert!(candidates.contains("▶ [working]"), "{candidates:?}");
+        assert!(!candidates.contains('\u{f04b}'));
+    }
+    for value in ["true", "12", "[]", "{}"] {
+        fs::write(bin.join("config.toml"), format!("status_icons = {value}\n")).unwrap();
+        let output = run_pick(&home, &bin, root);
+        assert!(!output.status.success(), "accepted {value}");
+        assert!(output.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&output.stderr).contains("status_icons"));
+    }
+}
+
 #[test]
 fn executable_relative_config_replaces_defaults_and_preserves_order_and_depth() {
     let temp = TempDir::new().unwrap();

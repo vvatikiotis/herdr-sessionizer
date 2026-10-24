@@ -228,6 +228,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
         settled_state: list | None = None,
         settled_action: bytes | None = None,
         settled_position: int | None = None,
+        settled_identity: str | None = None,
         timeout: float = 15.0,
     ):
         listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
@@ -295,6 +296,13 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                             lambda state: state.get("query") == settled_query.decode() and not state.get("reading", False),
                             f"fzf query {settled_query!r} to settle",
                         )
+                        if settled_identity is not None:
+                            state = wait_for_fzf_state(
+                                lambda state: state.get("query") == settled_query.decode()
+                                and not state.get("reading", False)
+                                and settled_identity in state.get("current", {}).get("text", ""),
+                                f"fzf selected identity {settled_identity!r}",
+                            )
                         if settled_state is not None:
                             settled_state.append(state)
                         if settled_position is not None:
@@ -494,12 +502,31 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
             # Explicit Nerd mode must render the configured codepoint and keep
             # the status label visible through real fzf.
             (plugin / "config.toml").write_text('status_icons = "nerd"\n')
-            nerd_code, nerd_screen = run_picker(b"\x1b", wait_for_text=str(search_term).encode())
+            nerd_state = []
+            before_nerd = navigation_calls()
+            nerd_code, nerd_screen = run_picker(
+                str(search_term).encode(), b"\r",
+                wait_for_text=str(search_term).encode(),
+                wait_after_first=str(search_term).encode(),
+                settled_query=str(search_term).encode(),
+                settled_state=nerd_state,
+                settled_identity=f"|{agent_pane}\t",
+            )
+            after_nerd = navigation_calls()
             (plugin / "config.toml").unlink()
             expected_nerd = {"working": "\uf04b", "done": "\uf00c", "idle": "\uf04c", "blocked": "\uf056"}
             icon = expected_nerd.get(status, "?")
-            if nerd_code != 0 or icon.encode() not in nerd_screen or f"[{status}]".encode() not in nerd_screen:
-                raise AssertionError(f"Nerd mode omitted expected icon/status {icon!r} [{status}]: {nerd_screen[-3000:]!r}")
+            current_nerd = nerd_state[-1]["current"]["text"]
+            nerd_identity = current_nerd.split("\t")[2].split("|")
+            if nerd_identity[0] != "agent" or nerd_identity[3] != agent_pane:
+                raise AssertionError(f"Nerd mode selected wrong identity: {current_nerd!r}")
+            if f"{icon} [{status}]" not in current_nerd:
+                raise AssertionError(f"Nerd mode current row lacks icon/status: {current_nerd!r}")
+            expected_nerd_actions = [f"tab focus {nerd_identity[2]}", f"agent focus {agent_pane}"]
+            if nerd_code != 0 or after_nerd[len(before_nerd):] != expected_nerd_actions:
+                raise AssertionError(f"Nerd selection actions: {after_nerd[len(before_nerd):]!r}")
+            if str(beta).encode() not in nerd_screen:
+                raise AssertionError("Nerd selection did not output its parent directory")
 
             # Keep the picker snapshot while making its captured pane stale.
             listener = unix_socket.socket(unix_socket.AF_INET, unix_socket.SOCK_STREAM)
