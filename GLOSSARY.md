@@ -75,7 +75,7 @@ The maximum number of directory levels below a discovery root included in discov
 A path deliberately added to the directory choices independently of discovery.
 
 **Exclusion**:
-An exact path omitted from discovery together with its descendants. It does not cancel an explicit inclusion.
+A directory name or exact path omitted from discovery together with its descendants. A name matches at any depth beneath a discovery root; an exclusion does not cancel an explicit inclusion.
 
 **Omitted workspace**:
 An open user workspace absent from the picker because no usable workspace directory could be identified.

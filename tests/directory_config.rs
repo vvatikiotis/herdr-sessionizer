@@ -277,6 +277,57 @@ fn configuration_is_reread_and_lookup_does_not_depend_on_caller_directory() {
 }
 
 #[test]
+fn basename_exclusions_prune_matching_directories_at_any_depth() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    for name in [".git", ".venv", "venv", "node_modules", "__pycache__"] {
+        fs::create_dir_all(home.join(format!("root/a/{name}/hidden"))).unwrap();
+        fs::create_dir_all(home.join(format!("root/sibling-{name}"))).unwrap();
+    }
+    fs::write(
+        bin.join("config.toml"),
+        r#"exclude = [".git", ".venv", "venv", "node_modules", "__pycache__"]
+[[roots]]
+path = "~/root"
+depth = 3
+"#,
+    )
+    .unwrap();
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    for name in [".git", ".venv", "venv", "node_modules", "__pycache__"] {
+        assert!(!candidates.contains(&format!("{name}/")), "{candidates}");
+    }
+    assert!(candidates.contains(&format!("{}\t", home.join("root/a").display())));
+    assert!(candidates.contains(&format!("{}\t", home.join("root/sibling-.git").display())));
+
+    fs::remove_file(bin.join("config.toml")).unwrap();
+    let output = run_pick(&home, &bin, root);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let defaults = fs::read_to_string(root.join("candidates")).unwrap();
+    // Defaults search home, not personal project-root conventions.
+    assert!(defaults.contains(&format!("{}\t", home.join("other").display())));
+    assert!(!defaults.contains(&format!("{}\t", home.join("Mail").display())));
+    for name in [".git", ".venv", "venv", "node_modules", "__pycache__"] {
+        assert!(
+            !defaults.contains(&format!("{}\t", home.join("root/a").join(name).display())),
+            "{defaults}"
+        );
+    }
+}
+
+#[test]
 fn built_in_defaults_stop_at_depth_three_but_editable_config_can_reach_depth_four() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();

@@ -55,7 +55,7 @@ path = "~/Sandbox"
 depth = 4
 ```
 
-Root paths must be absolute or start with `~/`, and depth must be positive. Depth 1 means immediate child directories. `include` paths are added directly; `exclude` paths are omitted from discovery. The default status style is `plain`; `nerd` requires a compatible terminal font and is not selected automatically.
+Root paths must be absolute or start with `~/`, and depth must be positive. Depth 1 means immediate child directories. `include` paths are added directly. A one-component `exclude` such as `.git` prunes matching directories at any depth under each root; absolute and `~/` exclusions retain exact-path and subtree semantics. The missing-config defaults discover beneath `~/` to depth 3, add no explicit includes, and exclude `.git`, `.venv`, `venv`, `node_modules`, and `__pycache__`. The default status style is `plain`; `nerd` requires a compatible terminal font and is not selected automatically.
 
 Only `config.toml` is read. If upgrading from the old `directories.toml` layout, manually transfer its settings; there is no automatic migration or fallback. Invalid configuration or directory discovery errors appear in the picker and do not fall back to defaults or create a workspace.
 

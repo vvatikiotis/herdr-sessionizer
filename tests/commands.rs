@@ -236,7 +236,7 @@ fn track_promotes_focused_workspace_and_deduplicates_open_history() {
 }
 
 #[test]
-fn picker_discovers_only_supported_depths_and_prunes_development_archives() {
+fn picker_discovers_configured_depths_and_prunes_exact_exclusions() {
     use std::os::unix::fs::symlink;
 
     let temp = TempDir::new().unwrap();
@@ -262,6 +262,15 @@ fn picker_discovers_only_supported_depths_and_prunes_development_archives() {
     fs::create_dir_all(&state).unwrap();
     fs::create_dir_all(&bin).unwrap();
     fs::write(
+        bin.join("config.toml"),
+        "exclude = [\"~/devel/Archive\", \"~/devel/.sync\", \"~/devel/.SynologyWorkingDirectory\"]\n[[roots]]\npath = \"~/VAULT\"\ndepth = 3\n[[roots]]\npath = \"~/devel\"\ndepth = 3\n",
+    ).unwrap();
+    fs::copy(
+        env!("CARGO_BIN_EXE_herdr-sessionizer"),
+        bin.join("sessionizer"),
+    )
+    .unwrap();
+    fs::write(
         root.join("workspaces.json"),
         r#"{"result":{"workspaces":[]}}"#,
     )
@@ -286,7 +295,7 @@ exit 0
 "###,
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_herdr-sessionizer"))
+    let output = Command::new(bin.join("sessionizer"))
         .arg("pick")
         .env("HOME", &home)
         .env("FIXTURE", root)

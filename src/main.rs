@@ -335,6 +335,7 @@ struct LoadedDirectoryConfig {
     roots: Vec<(PathBuf, usize)>,
     includes: Vec<PathBuf>,
     excludes: std::collections::HashSet<PathBuf>,
+    excluded_basenames: std::collections::HashSet<String>,
     status_icons: StatusIcons,
 }
 
@@ -349,7 +350,13 @@ fn discover_directories(home: &Path) -> Result<(Vec<PathBuf>, StatusIcons), Box<
     let mut directories = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for (root, depth) in &config.roots {
-        if config.excludes.contains(root) {
+        if config.excludes.contains(root)
+            || config.excluded_basenames.contains(
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or_default(),
+            )
+        {
             continue;
         }
         discover_under_config(
@@ -357,6 +364,7 @@ fn discover_directories(home: &Path) -> Result<(Vec<PathBuf>, StatusIcons), Box<
             depth,
             0,
             &config.excludes,
+            &config.excluded_basenames,
             &mut directories,
             &mut seen,
         )?;
@@ -377,38 +385,16 @@ fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn E
     let config = match fs::read_to_string(&config_path) {
         Ok(contents) => toml::from_str::<DirectoryConfig>(&contents)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirectoryConfig {
-            roots: Some(vec![
-                DirectoryRoot {
-                    path: "~/VAULT".into(),
-                    depth: 3,
-                },
-                DirectoryRoot {
-                    path: "~/devel".into(),
-                    depth: 3,
-                },
-            ]),
-            includes: Some(
-                [
-                    "~/dotfiles",
-                    "~/Notes",
-                    "~/Downloads",
-                    "~/Work",
-                    "~/devel",
-                    "~/Mail",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-            ),
+            roots: Some(vec![DirectoryRoot {
+                path: "~/".into(),
+                depth: 3,
+            }]),
+            includes: Some(Vec::new()),
             excludes: Some(
-                [
-                    "~/devel/Archive",
-                    "~/devel/.sync",
-                    "~/devel/.SynologyWorkingDirectory",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
+                [".git", ".venv", "venv", "node_modules", "__pycache__"]
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect(),
             ),
             status_icons: None,
         },
@@ -446,16 +432,25 @@ fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn E
         .into_iter()
         .map(|path| normalize_config_path(&path, home))
         .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
-    let excludes = config
-        .excludes
-        .unwrap_or_default()
-        .into_iter()
-        .map(|path| normalize_config_path(&path, home))
-        .collect::<Result<std::collections::HashSet<_>, Box<dyn Error>>>()?;
+    let mut excludes = std::collections::HashSet::new();
+    let mut excluded_basenames = std::collections::HashSet::new();
+    for value in config.excludes.unwrap_or_default() {
+        if !value.is_empty()
+            && !value.contains('/')
+            && !value.contains('\\')
+            && value != "."
+            && value != ".."
+        {
+            excluded_basenames.insert(value);
+        } else {
+            excludes.insert(normalize_config_path(&value, home)?);
+        }
+    }
     Ok(LoadedDirectoryConfig {
         roots,
         includes,
         excludes,
+        excluded_basenames,
         status_icons: match config.status_icons.as_deref() {
             Some("nerd") => StatusIcons::Nerd,
             Some("plain") | None => StatusIcons::Plain,
@@ -493,6 +488,7 @@ fn discover_under_config(
     max_depth: &usize,
     depth: usize,
     excludes: &std::collections::HashSet<PathBuf>,
+    excluded_basenames: &std::collections::HashSet<String>,
     results: &mut Vec<PathBuf>,
     seen: &mut std::collections::HashSet<PathBuf>,
 ) -> Result<(), Box<dyn Error>> {
@@ -517,14 +513,30 @@ fn discover_under_config(
         if is_symlink && !is_directory {
             continue;
         }
-        if !(is_directory || is_symlink) || next_depth > *max_depth || excludes.contains(&path) {
+        let basename = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_default();
+        if !(is_directory || is_symlink)
+            || next_depth > *max_depth
+            || excludes.contains(&path)
+            || excluded_basenames.contains(basename)
+        {
             continue;
         }
         if seen.insert(path.clone()) {
             results.push(path.clone());
         }
         if is_directory && !is_symlink {
-            discover_under_config(&path, max_depth, next_depth, excludes, results, seen)?;
+            discover_under_config(
+                &path,
+                max_depth,
+                next_depth,
+                excludes,
+                excluded_basenames,
+                results,
+                seen,
+            )?;
         }
     }
     Ok(())

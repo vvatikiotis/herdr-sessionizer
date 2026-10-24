@@ -8,8 +8,14 @@ include = [
   "~/Documents/example-notes",
 ]
 
-# Exact paths omitted from discovery.
+# A single directory name prunes matching directories anywhere beneath a root.
+# Absolute and ~/ paths still exclude that exact path and its subtree.
 exclude = [
+  ".git",
+  ".venv",
+  "venv",
+  "node_modules",
+  "__pycache__",
   "~/Projects/client-apps/retired",
 ]
 
