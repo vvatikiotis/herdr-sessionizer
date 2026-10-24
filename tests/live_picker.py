@@ -314,7 +314,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                             )
                         if settled_action is not None:
                             send_fzf_action(settled_action)
-            read_pty(master, process, output, deadline)
+            read_pty(master, process, output, time.monotonic() + timeout)
             if process.poll() is None:
                 raise RuntimeError(f"picker did not exit after input: {bytes(output)[-3000:]!r}")
             return process.returncode, bytes(output)
@@ -487,6 +487,7 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                 wait_for_text=b"~/VAULT/alpha",
                 wait_after_first=b"epsilon",
                 settled_query=b"epsilon",
+                settled_identity=f"directory|{epsilon}",
             )
             after_directory = navigation_calls()
             if code != 0 or not any(
