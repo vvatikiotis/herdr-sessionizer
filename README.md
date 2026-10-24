@@ -9,14 +9,16 @@ chmod 755 ./herdr-sessionizer.new &&
 mv -f ./herdr-sessionizer.new ./herdr-sessionizer
 ```
 
-The temporary-file-and-rename sequence avoids overwriting a running executable. The in-place repository install already includes `directories.toml`; keep that file beside the binary. For an external deployment, install the binary and a copy of `directories.toml` together without overwriting an existing user configuration:
+The temporary-file-and-rename sequence avoids overwriting a running executable. Keep `config.toml` beside the binary. For an external deployment, install the binary and a copy of `config.toml` together without overwriting an existing user configuration:
 
 ```sh
 install -m 755 target/release/herdr-sessionizer "$PLUGIN_DIR/herdr-sessionizer"
-if [ ! -e "$PLUGIN_DIR/directories.toml" ]; then
-  install -m 644 directories.toml "$PLUGIN_DIR/directories.toml"
+if [ ! -e "$PLUGIN_DIR/config.toml" ]; then
+  install -m 644 config.toml "$PLUGIN_DIR/config.toml"
 fi
 ```
+
+To move existing settings, merge the contents of `directories.toml` into `config.toml` manually. The install step above preserves an existing `config.toml`; the plugin does not migrate or merge legacy files.
 
 Relink after changing the manifest so Herdr reads its current event hooks:
 
@@ -37,7 +39,7 @@ Shell pool is optional: sessionizer requires no pool installation for its picker
 
 ## Directory configuration
 
-The picker reads `directories.toml` beside the running `herdr-sessionizer` executable every time it opens. It does not use the caller's working directory. The shipped file is the editable starting configuration:
+The picker reads only `config.toml` beside the running `herdr-sessionizer` executable every time it opens. It does not use the caller's working directory and ignores `directories.toml`. The shipped file is the editable starting configuration:
 
 ```toml
 include = ["~/dotfiles", "~/Notes", "~/Downloads", "~/Work", "~/devel", "~/Mail"]
@@ -49,10 +51,10 @@ depth = 3
 
 [[roots]]
 path = "~/devel"
-depth = 3
+depth = 4
 ```
 
-`roots` entries require an absolute or `~/` path and a positive `depth`. Depth one means immediate children of the root, not the root itself. Discovery processes roots in file order, then `include` entries in list order. Paths are normalized without resolving symlinks, and duplicate normalized roots are rejected. A present file replaces the built-in choices completely: omitted lists and an empty file mean no discovered or explicitly included paths. Built-in choices are used only when the file is absent.
+`roots` entries require an absolute or `~/` path and a positive `depth`. Optional `status_icons` accepts `"plain"` or `"nerd"`; it defaults to `"plain"`. Status icon rendering is not implemented yet. Depth one means immediate children of the root, not the root itself. Discovery processes roots in file order, then `include` entries in list order. Paths are normalized without resolving symlinks, and duplicate normalized roots are rejected. A present file replaces the built-in choices completely: omitted lists and an empty file mean no discovered or explicitly included paths. Built-in choices are used only when the file is absent.
 
 `exclude` entries are exact normalized paths. An excluded root is skipped before it is accessed, and an excluded discovered directory prunes its subtree. Explicit `include` entries are processed independently and can re-add an excluded or unavailable path; they are not checked until selection. Discovered symlinks are offered only when they point to existing directories, and are never traversed. Broken links and links to files are omitted. Other discovery errors, including unreadable roots or symlink targets, are shown in the picker.
 

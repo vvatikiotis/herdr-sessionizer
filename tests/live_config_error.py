@@ -75,7 +75,7 @@ def assert_no_navigation(root: Path, before: int) -> None:
 
 
 def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key: bytes) -> None:
-    (deployment / "directories.toml").write_text(config)
+    (deployment / "config.toml").write_text(config)
     before_calls = len((root / "herdr-calls").read_text().splitlines()) if (root / "herdr-calls").exists() else 0
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))
@@ -122,7 +122,7 @@ def run_view(root: Path, deployment: Path, env: dict[str, str], config: str, key
 
 
 def run_launch_failure(root: Path, deployment: Path, env: dict[str, str]) -> None:
-    (deployment / "directories.toml").write_text("unknown = true\n")
+    (deployment / "config.toml").write_text("unknown = true\n")
     before_calls = len((root / "herdr-calls").read_text().splitlines()) if (root / "herdr-calls").exists() else 0
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 30, 100, 0, 0))

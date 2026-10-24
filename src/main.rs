@@ -323,6 +323,7 @@ struct DirectoryConfig {
     includes: Option<Vec<String>>,
     #[serde(rename = "exclude")]
     excludes: Option<Vec<String>>,
+    status_icons: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -367,7 +368,7 @@ fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn E
     let config_path = std::env::current_exe()?
         .parent()
         .ok_or("running executable has no parent directory")?
-        .join("directories.toml");
+        .join("config.toml");
     let config = match fs::read_to_string(&config_path) {
         Ok(contents) => toml::from_str::<DirectoryConfig>(&contents)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => DirectoryConfig {
@@ -404,9 +405,18 @@ fn load_directory_config(home: &Path) -> Result<LoadedDirectoryConfig, Box<dyn E
                 .map(str::to_owned)
                 .collect(),
             ),
+            status_icons: None,
         },
         Err(error) => return Err(format!("cannot read {}: {error}", config_path.display()).into()),
     };
+
+    if config
+        .status_icons
+        .as_deref()
+        .is_some_and(|icons| !matches!(icons, "plain" | "nerd"))
+    {
+        return Err("status_icons must be either \"plain\" or \"nerd\"".into());
+    }
 
     let roots = config
         .roots

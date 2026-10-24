@@ -64,7 +64,7 @@ fn executable_relative_config_replaces_defaults_and_preserves_order_and_depth() 
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         r#"include = ["~/explicit", "~/root/a"]
 exclude = ["~/root/a/b"]
 [[roots]]
@@ -97,13 +97,50 @@ depth = 2
 }
 
 #[test]
+fn legacy_file_is_ignored_and_config_toml_wins_over_conflicting_values() {
+    let temp = TempDir::new().unwrap();
+    let root = temp.path();
+    let (home, bin) = deployment(&temp);
+    fs::create_dir_all(root.join("caller")).unwrap();
+    let baseline = run_pick(&home, &bin, root);
+    assert!(baseline.status.success());
+    let defaults = fs::read_to_string(root.join("candidates")).unwrap();
+    fs::write(bin.join("directories.toml"), "unknown = true\\n").unwrap();
+
+    let legacy_only = run_pick(&home, &bin, root);
+    assert!(legacy_only.status.success());
+    assert_eq!(
+        fs::read_to_string(root.join("candidates")).unwrap(),
+        defaults
+    );
+
+    fs::write(bin.join("config.toml"), "include = [\"~/other\"]\n").unwrap();
+    let configured = run_pick(&home, &bin, root);
+    assert!(configured.status.success());
+    let candidates = fs::read_to_string(root.join("candidates")).unwrap();
+    assert!(candidates.contains("other"));
+    assert!(!candidates.contains("explicit"));
+
+    fs::write(bin.join("directories.toml"), r#"include = ["~/explicit"]"#).unwrap();
+    fs::write(bin.join("config.toml"), "unknown = true\n").unwrap();
+    let invalid = run_pick(&home, &bin, root);
+    assert!(!invalid.status.success());
+    assert!(String::from_utf8_lossy(&invalid.stderr).contains("Directory discovery failed"));
+    assert!(invalid.stdout.is_empty());
+}
+
+#[test]
 fn configuration_is_reread_and_lookup_does_not_depend_on_caller_directory() {
     let temp = TempDir::new().unwrap();
     let root = temp.path();
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
-    let config = bin.join("directories.toml");
-    fs::write(&config, "include = [\"~/explicit\"]\n").unwrap();
+    let config = bin.join("config.toml");
+    fs::write(
+        &config,
+        "include = [\"~/explicit\"]\nstatus_icons = \"plain\"\n",
+    )
+    .unwrap();
     let first = run_pick(&home, &bin, root);
     assert!(first.status.success());
     assert!(
@@ -112,7 +149,11 @@ fn configuration_is_reread_and_lookup_does_not_depend_on_caller_directory() {
             .contains("explicit")
     );
 
-    fs::write(&config, "include = [\"~/other\"]\n").unwrap();
+    fs::write(
+        &config,
+        "include = [\"~/other\"]\nstatus_icons = \"nerd\"\n",
+    )
+    .unwrap();
     let second = run_pick(&home, &bin, root);
     assert!(second.status.success());
     let candidates = fs::read_to_string(root.join("candidates")).unwrap();
@@ -135,7 +176,7 @@ fn built_in_defaults_stop_at_depth_three_but_editable_config_can_reach_depth_fou
     assert!(!defaults.contains(&format!("{}\t", deep.display())));
 
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "[[roots]]\npath = \"~/devel\"\ndepth = 4\n",
     )
     .unwrap();
@@ -201,12 +242,12 @@ fn defaults_and_empty_or_omitted_configuration_replace_choices_predictably() {
 
     // The executable-boundary fallback is covered by the existing discovery
     // regression; this test focuses on present files replacing it completely.
-    fs::write(bin.join("directories.toml"), "\n").unwrap();
+    fs::write(bin.join("config.toml"), "\n").unwrap();
     let empty_output = run_pick(&home, &bin, root);
     assert!(empty_output.status.success());
     assert_eq!(fs::read_to_string(root.join("candidates")).unwrap(), "\n");
 
-    fs::write(bin.join("directories.toml"), "include = [\"~/explicit\"]\n").unwrap();
+    fs::write(bin.join("config.toml"), "include = [\"~/explicit\"]\n").unwrap();
     let omitted_output = run_pick(&home, &bin, root);
     assert!(omitted_output.status.success());
     let omitted = fs::read_to_string(root.join("candidates")).unwrap();
@@ -220,11 +261,7 @@ fn unavailable_explicit_inclusion_fails_before_focus_or_creation() {
     let root = temp.path();
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
-    fs::write(
-        bin.join("directories.toml"),
-        "include = [\"~/not-available\"]\n",
-    )
-    .unwrap();
+    fs::write(bin.join("config.toml"), "include = [\"~/not-available\"]\n").unwrap();
     executable(
         &bin.join("herdr"),
         r#"#!/bin/sh
@@ -259,7 +296,7 @@ fn normalized_paths_preserve_order_deduplicate_and_exclude_roots_before_access()
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         r#"include = ["~/explicit/", "~/explicit", "/tmp/does-not-matter"]
 exclude = ["~/missing-root"]
 [[roots]]
@@ -291,6 +328,7 @@ depth = 3
 fn invalid_configuration_forms_are_visible_without_using_defaults() {
     let cases = [
         ("unknown = true\n", "unknown field"),
+        ("status_icons = \"emoji\"\n", "status_icons must be either"),
         (
             "roots = [{ path = \"~/root\", depth = 1, extra = true }]\n",
             "unknown field",
@@ -327,7 +365,7 @@ fn invalid_configuration_forms_are_visible_without_using_defaults() {
         let root = temp.path();
         let (home, bin) = deployment(&temp);
         fs::create_dir_all(root.join("caller")).unwrap();
-        fs::write(bin.join("directories.toml"), config).unwrap();
+        fs::write(bin.join("config.toml"), config).unwrap();
         executable(
             &bin.join("fzf"),
             "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$FIXTURE/fzf-args\"\n: > \"$FIXTURE/candidates\"\nexit 0\n",
@@ -362,7 +400,7 @@ fn configured_symlinks_validate_targets_but_explicit_inclusions_remain_unchecked
     symlink(home.join("missing"), home.join("broken-link")).unwrap();
     fs::create_dir_all(root.join("caller")).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "include = [\"~/broken-link\"]\n[[roots]]\npath = \"~/\"\ndepth = 1\n",
     )
     .unwrap();
@@ -392,7 +430,7 @@ fn permission_denied_fixtures_are_checked_or_reported_as_unsupported() {
     fs::create_dir_all(&protected).unwrap();
     fs::set_permissions(&protected, fs::Permissions::from_mode(0o000)).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "[[roots]]\npath = \"~/protected\"\ndepth = 1\n",
     )
     .unwrap();
@@ -405,7 +443,7 @@ fn permission_denied_fixtures_are_checked_or_reported_as_unsupported() {
     symlink(&target, home.join("protected-link")).unwrap();
     fs::set_permissions(&target, fs::Permissions::from_mode(0o000)).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "[[roots]]\npath = \"~/\"\ndepth = 1\n",
     )
     .unwrap();
@@ -431,7 +469,7 @@ fn non_not_found_symlink_target_errors_stop_discovery() {
     symlink("loop", home.join("root/loop")).unwrap();
     fs::create_dir_all(root.join("caller")).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "[[roots]]\npath = \"~/root\"\ndepth = 2\n",
     )
     .unwrap();
@@ -456,11 +494,7 @@ fn candidate_paths_with_spaces_and_shell_punctuation_remain_data() {
     let project = home.join("it's project");
     fs::create_dir_all(&project).unwrap();
     fs::create_dir_all(root.join("caller")).unwrap();
-    fs::write(
-        bin.join("directories.toml"),
-        "include = [\"~/it's project\"]\n",
-    )
-    .unwrap();
+    fs::write(bin.join("config.toml"), "include = [\"~/it's project\"]\n").unwrap();
 
     let output = run_pick(&home, &bin, root);
     assert!(
@@ -483,7 +517,7 @@ fn discovery_error_is_error_only_even_with_existing_workspace_and_selection_atte
     fs::create_dir_all(home.join("project")).unwrap();
     symlink("loop", home.join("loop")).unwrap();
     fs::write(
-        bin.join("directories.toml"),
+        bin.join("config.toml"),
         "[[roots]]\npath = \"~/loop\"\ndepth = 1\n",
     )
     .unwrap();
@@ -527,8 +561,8 @@ fn shipped_configuration_matches_missing_file_defaults() {
     assert!(without_file.status.success());
     let defaults = fs::read_to_string(root.join("candidates")).unwrap();
     fs::copy(
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("directories.toml"),
-        bin.join("directories.toml"),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("config.toml"),
+        bin.join("config.toml"),
     )
     .unwrap();
     let with_file = run_pick(&home, &bin, root);
@@ -545,7 +579,7 @@ fn error_view_launch_failure_reports_original_and_display_errors() {
     let root = temp.path();
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
-    fs::write(bin.join("directories.toml"), "unknown = true\n").unwrap();
+    fs::write(bin.join("config.toml"), "unknown = true\n").unwrap();
     fs::remove_file(bin.join("fzf")).unwrap();
 
     let output = run_pick(&home, &bin, root);
@@ -562,7 +596,7 @@ fn malformed_configuration_fails_strictly_but_unrelated_tracking_still_works() {
     let root = temp.path();
     let (home, bin) = deployment(&temp);
     fs::create_dir_all(root.join("caller")).unwrap();
-    fs::write(bin.join("directories.toml"), "unknown = true\n").unwrap();
+    fs::write(bin.join("config.toml"), "unknown = true\n").unwrap();
     executable(
         &bin.join("fzf"),
         r#"#!/bin/sh
