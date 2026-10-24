@@ -1108,13 +1108,23 @@ sed -n '2p' "$FIXTURE/candidates"
     assert!(candidates.contains("\u{1b}[32m✓ [done]\u{1b}[0m"));
     assert!(candidates.contains("\u{1b}[90m? [paused]\u{1b}[0m"));
     assert!(candidates.contains("\u{1b}[90m? [unknown]\u{1b}[0m"));
-    for pane_id in ["wA:p1", "wA:p2"] {
-        assert!(candidates.lines().any(|line| {
-            line.split('\t')
-                .nth(1)
-                .is_some_and(|display| display.contains(pane_id))
-        }));
-    }
+    let agent_displays = candidates
+        .lines()
+        .filter_map(|line| line.split('\t').nth(1))
+        .filter(|display| display.contains("review (codex)"))
+        .collect::<Vec<_>>();
+    assert_eq!(agent_displays.len(), 2);
+    assert!(
+        agent_displays
+            .iter()
+            .all(|display| display.starts_with("  ↳ review (codex) "))
+    );
+    assert!(agent_displays.iter().all(|display| {
+        !display.contains("wA:")
+            && !display.contains("t1")
+            && !display.contains("p1")
+            && !display.contains("p2")
+    }));
 }
 
 #[test]
@@ -1394,7 +1404,13 @@ esac
     assert!(output.stdout.is_empty());
     let arguments = fs::read_to_string(root.join("fzf-args")).unwrap();
     let candidates = fs::read_to_string(root.join("candidates")).unwrap();
-    assert!(candidates.contains("Agent (p1)"));
+    let agent_display = candidates
+        .lines()
+        .filter_map(|line| line.split('\t').nth(1))
+        .find(|display| display.contains("Agent"))
+        .unwrap();
+    assert!(agent_display.starts_with("  ↳ Agent "));
+    assert!(!agent_display.contains("p1"));
     assert!(arguments.contains("Hidden workspaces (directory unavailable): missing"));
 }
 

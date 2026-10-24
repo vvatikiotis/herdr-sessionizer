@@ -44,7 +44,6 @@ struct AgentRow {
     workspace_id: String,
     tab_id: String,
     pane_id: String,
-    label: String,
     display: String,
     search: String,
 }
@@ -159,8 +158,7 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
             workspace.id,
             workspace.display
         ));
-        let mut rows = agent_rows(workspace, agent_list, status_icons);
-        disambiguate_agent_labels(&mut rows);
+        let rows = agent_rows(workspace, agent_list, status_icons);
         open_rows.extend(rows.into_iter().map(|row| {
             format!(
                 "{}\t  ↳ {}\tagent|{}|{}|{}\t{}",
@@ -585,10 +583,6 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value], icons: StatusIcons) -
                 (None, None) => "Agent".to_owned(),
             };
             let pane_id = agent.get("pane_id").and_then(Value::as_str).unwrap_or("");
-            if label == "Agent" && !pane_id.is_empty() {
-                label = format!("Agent ({pane_id})");
-            }
-            let base_label = label.clone();
             let status = agent
                 .get("agent_status")
                 .and_then(Value::as_str)
@@ -640,24 +634,11 @@ fn agent_rows(workspace: &OpenWorkspace, agents: &[Value], icons: StatusIcons) -
                     .unwrap_or("")
                     .to_owned(),
                 pane_id: pane_id.to_owned(),
-                label: base_label,
                 display: label,
                 search,
             }
         })
         .collect()
-}
-
-fn disambiguate_agent_labels(rows: &mut [AgentRow]) {
-    let mut counts = std::collections::HashMap::new();
-    for row in rows.iter() {
-        *counts.entry(row.label.clone()).or_insert(0usize) += 1;
-    }
-    for row in rows.iter_mut() {
-        if counts.get(&row.label).copied().unwrap_or(0) > 1 && !row.pane_id.is_empty() {
-            row.display = format!("{} ({})", row.display, row.pane_id);
-        }
-    }
 }
 
 fn selection_fields(selection: &str) -> (&str, Vec<&str>) {
