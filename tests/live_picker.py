@@ -559,6 +559,8 @@ with tempfile.TemporaryDirectory(prefix="hs-regression space-", dir="/tmp") as t
                     picker.kill()
                     picker.wait()
 
+            # Failure injection belongs only to the stale-target scenario.
+            (root / "fail-agent-focus").unlink()
             # The earlier alpha agent and later beta workspace both match. Real
             # fzf must accept the first matching row in display order.
             cli("agent", "start", "betaagentunique", "--kind", "pi", "--pane", beta_agent_pane, "--timeout", "60000", "--", "--no-session")
