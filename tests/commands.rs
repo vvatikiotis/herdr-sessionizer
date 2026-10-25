@@ -1265,8 +1265,13 @@ fn picker_reload_keeps_workspaces_and_filters_agents_by_search_fields() {
     for (query, expected, unexpected) in [
         ("project", &["review", "build"][..], &["deploy"][..]),
         ("codex", &["build"][..], &["review", "deploy"][..]),
+        ("no-such-agent", &[][..], &["review", "build", "deploy"][..]),
+        ("", &["review", "build", "deploy"][..], &[][..]),
     ] {
-        let temp = TempDir::new().unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("helper space ' $; ")
+            .tempdir()
+            .unwrap();
         let root = temp.path();
         let home = root.join("home");
         let state = root.join("state/herdr-sessionizer");
@@ -1315,8 +1320,16 @@ printf '%s\n' "$input" > "$FIXTURE/initial"
 for arg in "$@"; do
   if [[ "$arg" == --bind=change:reload:* ]]; then
     command=${arg#--bind=change:reload:}
-    command=${command//\{q\}/$QUERY}
+    printf -v quoted '%q' "$QUERY"
+    command=${command//\{q\}/$quoted}
     bash -c "$command" > "$FIXTURE/reloaded"
+    for binding in "$@"; do
+      if [[ "$binding" == --bind=result-final:transform:* ]]; then
+        transform=${binding#--bind=result-final:transform:}
+        transform=${transform//\{q\}/$quoted}
+        bash -c "$transform" > "$FIXTURE/transform"
+      fi
+    done
     head -n 1 "$FIXTURE/reloaded"
     exit 0
   fi
@@ -1330,6 +1343,7 @@ exit 0
             .env("HOME", &home)
             .env("FIXTURE", root)
             .env("QUERY", query)
+            .env("TMPDIR", root)
             .env("XDG_STATE_HOME", root.join("state"))
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .output()
@@ -1340,6 +1354,16 @@ exit 0
             String::from_utf8_lossy(&output.stderr)
         );
         let reloaded = fs::read_to_string(root.join("reloaded")).unwrap();
+        let transform = fs::read_to_string(root.join("transform")).unwrap();
+        assert_eq!(
+            transform,
+            match query {
+                "project" => "pos(1)\n",
+                "codex" => "pos(2)\n",
+                "" => "",
+                _ => "pos(4)\n",
+            }
+        );
         assert!(
             reloaded.contains("workspace|wProject"),
             "reloaded for {query}: {reloaded:?}"

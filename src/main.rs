@@ -1,5 +1,6 @@
 use serde_json::Value;
 use std::error::Error;
+use std::fmt::Write as FmtWrite;
 use std::fs::{self, File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -132,44 +133,41 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
         .filter(|workspace| workspace.get("workspace_id").and_then(Value::as_str) != Some(pool_id))
         .filter_map(|workspace| workspace.get("label").and_then(Value::as_str))
         .collect::<std::collections::HashSet<_>>();
-    let unopened = available
-        .iter()
-        .filter(|path| {
-            path.file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| !open_labels.contains(name))
-        })
-        .map(|path| path.to_string_lossy().into_owned())
-        .collect::<Vec<_>>();
-
     let width = open_workspaces
         .iter()
         .map(|workspace| workspace.display.chars().count())
         .max()
         .unwrap_or(0);
-    let mut open_rows = Vec::new();
+    let mut input = String::new();
     for workspace in &open_workspaces {
         let padding = width.saturating_sub(workspace.display.chars().count());
-        open_rows.push(format!(
+        writeln!(
+            input,
             "{}\t{}{}\tworkspace|{}\t{}",
             workspace.path,
             workspace.display,
             " ".repeat(padding),
             workspace.id,
             workspace.display
-        ));
-        let rows = agent_rows(workspace, agent_list, status_icons);
-        open_rows.extend(rows.into_iter().map(|row| {
-            format!(
+        )?;
+        for row in agent_rows(workspace, agent_list, status_icons) {
+            writeln!(
+                input,
                 "{}\t  ↳ {}\tagent|{}|{}|{}\t{}",
                 workspace.path, row.display, row.workspace_id, row.tab_id, row.pane_id, row.search
-            )
-        }));
+            )?;
+        }
     }
-    let directory_rows = unopened
-        .iter()
-        .map(|path| format!("{path}\t{path}\tdirectory|{path}"))
-        .collect::<Vec<_>>();
+    let open_boundary = input.len();
+    input.push('\n');
+    for path in available.iter().filter(|path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| !open_labels.contains(name))
+    }) {
+        let path = path.to_string_lossy();
+        writeln!(input, "{path}\t{path}\tdirectory|{path}")?;
+    }
     let warning = (!omitted.is_empty()).then(|| {
         format!(
             "Hidden workspaces (directory unavailable): {}",
@@ -179,13 +177,14 @@ fn pick_inner() -> Result<(), Box<dyn Error>> {
     let temporary = TemporaryDirectory::new()?;
     let open_file = temporary.path.join("open-workspaces");
     let directory_file = temporary.path.join("directories");
-    fs::write(&open_file, lines_with_newline(&open_rows))?;
-    fs::write(&directory_file, lines_with_newline(&directory_rows))?;
+    fs::write(&open_file, &input[..open_boundary])?;
+    fs::write(&directory_file, &input[open_boundary + 1..])?;
+    let bindings = prepare_fzf_bindings(&open_file, &directory_file)?;
     let mut error_header = None;
     let selection = loop {
         let selection = run_fzf(
-            &open_file,
-            &directory_file,
+            &bindings,
+            &input,
             picker_header(warning.as_deref(), error_header.as_deref()).as_deref(),
         )?;
         if selection.is_empty() {
@@ -660,14 +659,6 @@ fn selection_fields(selection: &str) -> (&str, Vec<&str>) {
     (selected_path, key.split('|').collect())
 }
 
-fn lines_with_newline(lines: &[String]) -> String {
-    if lines.is_empty() {
-        String::new()
-    } else {
-        format!("{}\n", lines.join("\n"))
-    }
-}
-
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -734,11 +725,10 @@ fn show_discovery_error(error: &str) -> Result<(), Box<dyn Error>> {
     Err(format!("{error}; error view exited with status {status}").into())
 }
 
-fn run_fzf(
+fn prepare_fzf_bindings(
     open_file: &Path,
     directory_file: &Path,
-    header: Option<&str>,
-) -> Result<String, Box<dyn Error>> {
+) -> Result<[String; 2], Box<dyn Error>> {
     let open = shell_quote(&open_file.to_string_lossy());
     let directories = shell_quote(&directory_file.to_string_lossy());
     let filter_file = open_file.with_file_name("filter-open");
@@ -784,14 +774,22 @@ awk -F'\t' '
     }
     let filter = shell_quote(&filter_file.to_string_lossy());
     let reload = format!(
-        r#"{filter} {{q}} {open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
+        r#"/bin/bash {filter} {{q}} {open}; printf '\n'; fzf --delimiter='\t' --nth=2 --filter={{q}} < {directories} || [[ $? -eq 1 ]]"#
     );
     let selection = format!(
-        r#"if [[ -n {{q}} ]]; then match=$(fzf --no-sort --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); filtered=$({filter} {{q}} {open}); if [[ -n "$match" ]]; then identity=$(printf '%s\n' "$match" | awk -F'\t' '{{print $3}}'); position=$(printf '%s\n' "$filtered" | awk -F'\t' -v identity="$identity" '$3 == identity {{print NR; exit}}'); fi; if [[ -n "$position" ]]; then printf 'pos(%s)\n' "$position"; else count=$(printf '%s\n' "$filtered" | awk 'NF {{count++}} END {{print count + 2}}'); printf 'pos(%s)\n' "$count"; fi; fi"#
+        r#"if [[ -n {{q}} ]]; then match=$(fzf --no-sort --delimiter=$'\t' --nth=4 --filter={{q}} < {open} | head -n 1); filtered=$(/bin/bash {filter} {{q}} {open}); if [[ -n "$match" ]]; then identity=$(printf '%s\n' "$match" | awk -F'\t' '{{print $3}}'); position=$(printf '%s\n' "$filtered" | awk -F'\t' -v identity="$identity" '$3 == identity {{print NR; exit}}'); fi; if [[ -n "$position" ]]; then printf 'pos(%s)\n' "$position"; else count=$(printf '%s\n' "$filtered" | awk 'NF {{count++}} END {{print count + 2}}'); printf 'pos(%s)\n' "$count"; fi; fi"#
     );
-    let mut input = fs::read_to_string(open_file)?;
-    input.push('\n');
-    input.push_str(&fs::read_to_string(directory_file)?);
+    Ok([
+        format!("--bind=change:reload:{reload}"),
+        format!("--bind=result-final:transform:{selection}"),
+    ])
+}
+
+fn run_fzf(
+    bindings: &[String; 2],
+    input: &str,
+    header: Option<&str>,
+) -> Result<String, Box<dyn Error>> {
     let mut child = Command::new("fzf")
         .args([
             "--cycle",
@@ -801,8 +799,7 @@ awk -F'\t' '
             "--layout=reverse",
             "--bind=ctrl-space:accept",
         ])
-        .arg(format!("--bind=change:reload:{reload}"))
-        .arg(format!("--bind=result-final:transform:{selection}"))
+        .args(bindings)
         .args([
             "--raw",
             "--info=inline",
